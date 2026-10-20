@@ -29,8 +29,9 @@ MUTEX_NAME = "Global\\DeviceBatteryTray_single_instance"
 UI_TITLE = "我的设备电量"
 
 DEFAULT_CONFIG = {
-    "interval": 60,        # 托盘轮询间隔（秒）
-    "autostart": True,     # 开机自启
+    "interval": 60,          # 托盘轮询间隔（秒）
+    "autostart": True,       # 开机自启
+    "show_device_icon": True,  # 托盘圆形电量中间显示设备图标（否则显示数字）
 }
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),

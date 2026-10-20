@@ -455,6 +455,23 @@ def build_ui():
     ttk.Checkbutton(row_a, text="开机自启（任务管理器可见）", variable=v_boot,
                     command=on_boot).pack(side="left", padx=(18, 0))
 
+    v_device_icon = tk.BooleanVar(
+        value=bool(cfg.get("show_device_icon", True)))
+
+    def on_device_icon():
+        cfg["show_device_icon"] = bool(v_device_icon.get())
+        tc.save_config(cfg)
+        tc.post_to_tray(tc.MSG_RELOAD)
+        state = "设备图标" if cfg["show_device_icon"] else "电量数字"
+        if tc.is_tray_running():
+            notify(f"托盘图标已切换为{state}", 6)
+        else:
+            notify(f"设置已保存：托盘图标将显示{state}", 6)
+
+    ttk.Checkbutton(row_a, text="托盘图标显示设备类型",
+                    variable=v_device_icon,
+                    command=on_device_icon).pack(side="left", padx=(18, 0))
+
     btn_tray = ttk.Button(row_b, text="退出托盘程序", command=on_tray_toggle)
     btn_tray.pack(side="right")
     btn_link = ttk.Button(row_b, text="重建桌面链接", command=on_links)

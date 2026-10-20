@@ -3,8 +3,9 @@
 
 界面约定
 --------
-* 通知区域三个图标：雷柏 VT7（纯数字）、惠普 GT87（纯数字）、
-  ROG 破风（数字带深色底板）。
+* 通知区域三个图标：雷柏 VT7（鼠标）、惠普 GT87（键盘）、ROG 破风（耳机）。
+  默认是「圆角正方形电量环 + 中间直角像素设备图标」，可在简洁界面里取消
+  「托盘图标显示设备类型」改回数字图标。
   图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
 * **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
 * 左键图标 → 立刻刷新一次。
@@ -157,10 +158,10 @@ KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
                                   wintypes.LPCWSTR]
 
 TRAY_ICONS = [
-    # (uID, key, 提示名, 是否带底板)
-    (1, "rapoo", "雷柏 VT7", False),
-    (2, "hp", "惠普 GT87", False),
-    (3, "asus", "ROG 破风", True),
+    # (uID, key, 提示名, 是否带底板, 设备类型)
+    (1, "rapoo", "雷柏 VT7", False, "mouse"),
+    (2, "hp", "惠普 GT87", False, "keyboard"),
+    (3, "asus", "ROG 破风", False, "headset"),
 ]
 
 
@@ -196,7 +197,8 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
-        self.levels = {k: (None, "正在读取…", "") for _, k, _, _ in TRAY_ICONS}
+        self.levels = {k: (None, "正在读取…", "")
+                       for _, k, _, _, _ in TRAY_ICONS}
         self.icons_added = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
@@ -234,11 +236,13 @@ class TrayApp:
         return nid
 
     def _apply_icon(self, action: int, uID: int, key: str, title: str,
-                    plate: bool) -> bool:
+                    plate: bool, device: str) -> bool:
         level, err, status = self.levels[key]
         text = str(level) if level is not None else "--"
         nid = self._nid(uID)
-        nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
+        nid.hIcon = win_icon.make_hicon(
+            text, self._color(level), plate, device=device,
+            show_device=bool(self.cfg.get("show_device_icon", True)))
         if level is not None:
             extra = f"（{status}）" if status else ""
             nid.szTip = (f"{title}：{level}%{extra}"
@@ -248,8 +252,8 @@ class TrayApp:
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
     def add_icons(self) -> None:
-        for uID, key, title, plate in TRAY_ICONS:
-            ok = self._apply_icon(NIM_ADD, uID, key, title, plate)
+        for uID, key, title, plate, device in TRAY_ICONS:
+            ok = self._apply_icon(NIM_ADD, uID, key, title, plate, device)
             self.log(f"NIM_ADD {title} -> {'ok' if ok else '失败'}")
         self.icons_added = True
 
@@ -257,11 +261,11 @@ class TrayApp:
         if not self.icons_added:
             self.add_icons()
             return
-        for uID, key, title, plate in TRAY_ICONS:
-            self._apply_icon(NIM_MODIFY, uID, key, title, plate)
+        for uID, key, title, plate, device in TRAY_ICONS:
+            self._apply_icon(NIM_MODIFY, uID, key, title, plate, device)
 
     def remove_icons(self) -> None:
-        for uID, _, _, _ in TRAY_ICONS:
+        for uID, _, _, _, _ in TRAY_ICONS:
             nid = self._nid(uID)
             nid.uFlags = 0
             SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
@@ -282,10 +286,16 @@ class TrayApp:
         """
         new = tc.load_config()
         changed = new["interval"] != self.cfg["interval"]
+        icon_changed = (bool(new.get("show_device_icon", True))
+                        != bool(self.cfg.get("show_device_icon", True)))
         self.cfg = new
         if changed:
             self.log(f"刷新间隔 -> {new['interval']} 秒")
             self.apply_timer()
+        if icon_changed:
+            self.log("托盘设备图标 -> " +
+                     ("开" if new.get("show_device_icon", True) else "关"))
+            self.update_icons()
 
         actual = tc.is_autostart_enabled()
         if bool(self.cfg.get("autostart")) != actual:

@@ -31,6 +31,9 @@ python my_devices.py
 - 只想看一眼：`python my_devices.py --once` —— 打印后退出
 - 托盘常驻：`pythonw tray_app.py` —— 三个图标，左键刷新、右键打开面板；
   排查问题用 `python tray_app.py --debug`
+- 托盘图标默认是「圆角正方形电量环 + 中间直角像素设备图标」
+  （鼠标 / 键盘 / 耳机），面板设置里可以取消「托盘图标显示设备类型」，
+  改回数字图标；tooltip 始终显示电量百分比和充电状态
 - 想摸新设备的协议：`python app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
 
 ## 用 prompt 做一份你自己的
@@ -185,7 +188,7 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 | `my_devices.py` | **主界面**（三台设备简洁面板） |
 | `tray_app.py` | 托盘程序：三台设备三个图标，数字随电量变色，tooltip 显示充电状态 |
 | `tray_common.py` | 配置、开机自启、进程间消息 |
-| `win_icon.py` | 点阵数字 → ICO → HICON（图标就是电量数字） |
+| `win_icon.py` | 托盘图标：圆角正方形电量环 + 直角像素设备图标（纯 Python 硬边绘制）→ ICO → HICON |
 | `win_link.py` | 软连接：符号链接 / 目录 junction / 硬链接，按权限自动降级 |
 | `win_shell.py` | 已知文件夹路径 + 用 ctypes COM 创建 `.lnk` |
 | `app.py` | 完整调试版界面 |
