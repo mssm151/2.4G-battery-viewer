@@ -3,17 +3,21 @@
 Windows 上读取 2.4G 无线外设电量的小工具。**纯 ctypes 调系统 DLL，零第三方依赖**——
 不用 hidapi、不用 pystray、不用 Pillow、不用 pywin32，装了 Python 就能跑。
 
-## ⚠️ 只支持这两台设备
+## 当前适配的三台设备
 
-这**不是一个通用工具**。协议是逆向我们这两台具体设备得到的——换成别的鼠标或耳机，
-大概率一个字节都读不出来（界面会显示「没有可用的读取方式」）。
+这**不是一个通用工具**。三套协议都是逆向我们手头这三台设备得到的——换成别的设备，
+大概率一个字节都读不出来（界面会显示「读取失败」）。
 
 | 设备 | VID:PID | 读取方式 |
 |---|---|---|
-| ATK / VXE 无线鼠标 | `373B:1216` | usage page `0xFF05`，Report ID `0x08`，请求 `7D 72 02 00 01 07 01`，电量取回复第 7 字节 |
-| DARKRIM SHADOW 耳机（杰理方案 dongle） | `3654:6901` | 私有 TLV 协议：`CRC16-CCITT-FALSE` over `帧[1:10+len]`（大端），TLV `0x01` 即电量 |
+| 雷柏 VT7 鼠标 | `24AE:1413` | Usage `0xFF00:0x0002`，Report ID `0x07`。设备每 2–5 秒主动推送状态报文；电量 = 报文第 8 字节，第 7 字节 `01`=未充电 / `02`=充电中 |
+| 惠普 GT87 键盘 | `3554:FA09` | Usage `0xFF02:0x0002`，Report ID `0x13`。发 `13 05 01 00`，接收器回 `13 0a`；数据 `05 64 10 00`：电量 = 第 6 字节，状态位 bit4 = 充电中 |
+| ROG 破风 (ROG PELTA) 耳机 | `0B05:1B84`（兼容 `1B82`/`1B86`） | Usage `0xFF00:0x0001`，Report ID `0xCC`。发 `CC 12 07 00 00`，回复载荷第 5 字节 = 电量；子命令 `0x28` 查充电状态 |
 
-**你的设备不在这两行里？** 别硬改这个仓库，往下看「用 prompt 做一份你自己的」。
+> 旧版的 ATK 鼠标 / DARKRIM 耳机读取代码仍保留在 `battery.py`、`darkrim_proto.py` 里，
+> 但主界面和托盘都已切换到上面这三台设备。
+
+**你的设备不在这三行里？** 别硬改这个仓库，往下看「用 prompt 做一份你自己的」。
 
 ## 使用方法
 
@@ -21,14 +25,18 @@ Windows 上读取 2.4G 无线外设电量的小工具。**纯 ctypes 调系统 D
 python my_devices.py
 ```
 
-面板里会显示两台设备的电量，默认自动刷新，底部可以改刷新间隔。
+面板里会显示三台设备的电量（雷柏 VT7 / 惠普 GT87 / ROG 破风），默认自动刷新，
+底部可以改刷新间隔。
 
 - 只想看一眼：`python my_devices.py --once` —— 打印后退出
+- 托盘常驻：`pythonw tray_app.py` —— 三个图标，左键刷新、右键打开面板；
+  排查问题用 `python tray_app.py --debug`
 - 想摸新设备的协议：`python app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
 
 ## 用 prompt 做一份你自己的
 
-这套东西的价值不在代码，在**方法**。下面这段 prompt 把我做这个工具的全过程和结论都写进去了，
+这套东西的价值不在代码，在**方法**。下面这段 prompt 以最初的 ATK / DARKRIM 两台设备为例，
+把我做这个工具的全过程和结论都写进去了；当前仓库正是用同样的方法适配了上面三台设备。
 交给一个**能动手的 Agent** 就能按你自己的设备重做一份。
 
 > **为什么必须是 Agent，不能是聊天 AI？**
@@ -168,11 +176,14 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 | 文件 | 说明 |
 |---|---|
 | `hid_win.py` | HID 底层：枚举接口、Feature Report 读写、异步 Input Report、字段解析 |
-| `battery.py` | 多策略电量读取 + 厂商协议表 + 手动标定 |
-| `darkrim_proto.py` | DARKRIM 杰理方案私有协议（帧构造 / CRC / TLV 解析） |
+| `rapoo_vt7.py` | 雷柏 VT7：解析设备主动推送的 Report `0x07` 状态报文 |
+| `hp_gt87.py` | 惠普 GT87：Compx 2.4G 接收器的 `0x13/0x0a` 电量查询 |
+| `asus_pelta.py` | ROG 破风：ASUS 私有 HID 协议（`0x12/0x07` 电量、`0x12/0x28` 充电状态） |
+| `battery.py` | 旧版通用电量读取层（ATK 等，保留） |
+| `darkrim_proto.py` | 旧版 DARKRIM 杰理方案私有协议（保留） |
 | `bt_battery.py` | 蓝牙耳机 HFP 电量（未公开 PnP 属性） |
-| `my_devices.py` | **主界面**（简洁面板） |
-| `tray_app.py` | 托盘程序（`Shell_NotifyIconW` + `SetTimer`，空闲几乎不占 CPU） |
+| `my_devices.py` | **主界面**（三台设备简洁面板） |
+| `tray_app.py` | 托盘程序：三台设备三个图标，数字随电量变色，tooltip 显示充电状态 |
 | `tray_common.py` | 配置、开机自启、进程间消息 |
 | `win_icon.py` | 点阵数字 → ICO → HICON（图标就是电量数字） |
 | `win_link.py` | 软连接：符号链接 / 目录 junction / 硬链接，按权限自动降级 |

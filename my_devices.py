@@ -19,7 +19,10 @@ import traceback
 from dataclasses import dataclass
 from typing import Optional
 
+import asus_pelta as asp
 import hid_win as hw
+import hp_gt87 as hpg
+import rapoo_vt7 as rv
 import battery as bt
 import darkrim_proto as drp
 import tray_common as tc
@@ -108,8 +111,56 @@ def read_darkrim() -> Reading:
     return r
 
 
+def read_rapoo_vt7() -> Reading:
+    """雷柏 VT7（24AE:1413）—— 设备主动推送的状态报文。"""
+    r = Reading("雷柏 VT7", "未连接")
+    info = rv.read_info()
+    if not info.online:
+        r.error = info.detail or "没找到接收器"
+        return r
+    r.subtitle = "24AE:1413 · 2.4G 接收器"
+    r.level = info.level
+    r.status = info.charging_text
+    r.detail = "雷柏状态报文（Report 0x07，设备主动上报）"
+    if info.level is None:
+        r.error = info.detail or "没有收到状态报文（请动一下鼠标）"
+    return r
+
+
+def read_hp_gt87() -> Reading:
+    """惠普 GT87（3554:FA09）—— Compx 2.4G 接收器。"""
+    r = Reading("惠普 GT87", "未连接")
+    info = hpg.read_info()
+    if not info.online:
+        r.error = info.detail or "没找到接收器"
+        return r
+    r.subtitle = "3554:FA09 · 2.4G 接收器"
+    r.level = info.level
+    r.status = info.charging_text
+    r.detail = "Compx 私有协议（0x13 查询 → 0x0a 电量）"
+    if info.level is None:
+        r.error = info.detail or "接收器没有回复（请按一下键盘唤醒）"
+    return r
+
+
+def read_rog_pelta() -> Reading:
+    """ROG 破风（0B05:1B84）—— ASUS 私有 HID 协议。"""
+    r = Reading("ROG 破风", "未连接")
+    info = asp.read_info()
+    if not info.online:
+        r.error = info.detail or "没找到接收器"
+        return r
+    r.subtitle = f"0B05:1B84 · {info.name}"
+    r.level = info.level
+    r.status = info.charging_text
+    r.detail = "ASUS 私有 HID 协议（Usage 0xFF00:0x0001，Report 0xCC）"
+    if info.level is None:
+        r.error = info.detail or "耳机没有上报电量（请确认耳机已开机）"
+    return r
+
+
 def read_all() -> list[Reading]:
-    return [read_atk(), read_darkrim()]
+    return [read_rapoo_vt7(), read_hp_gt87(), read_rog_pelta()]
 
 
 # ==========================================================================
@@ -205,8 +256,8 @@ def build_ui():
     root = tk.Tk()
     root.title(tc.UI_TITLE)
     root.configure(bg=BG)
-    root.geometry("680x470")
-    root.minsize(620, 440)
+    root.geometry("1060x500")
+    root.minsize(980, 460)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -266,14 +317,17 @@ def build_ui():
     # ---- 卡片 ----
     body = ttk.Frame(root, padding=(18, 4, 18, 4))
     body.pack(fill="both", expand=True)
-    body.columnconfigure(0, weight=1, uniform="card")
-    body.columnconfigure(1, weight=1, uniform="card")
+    for col in range(3):
+        body.columnconfigure(col, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
 
-    card_atk = DeviceCard(body, "ATK 鼠标")
-    card_atk.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    card_dr = DeviceCard(body, "DARKRIM 耳机")
-    card_dr.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    card_rp = DeviceCard(body, "雷柏 VT7")
+    card_rp.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+    card_hp = DeviceCard(body, "惠普 GT87")
+    card_hp.frame.grid(row=0, column=1, sticky="nsew", padx=6)
+    card_dr = DeviceCard(body, "ROG 破风")
+    card_dr.frame.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
+    cards = (card_rp, card_hp, card_dr)
 
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
     foot.pack(fill="x", side="bottom")
@@ -411,11 +465,11 @@ def build_ui():
 
     # ---- 刷新逻辑 ----
     def apply(readings: list[Reading]):
-        card_atk.update(readings[0])
-        card_dr.update(readings[1])
+        for card, r in zip(cards, readings):
+            card.update(r)
         ok = sum(1 for r in readings if r.ok)
         foot.configure(text=f"更新于 {time.strftime('%H:%M:%S')}   "
-                            f"成功读取 {ok}/2 个设备"
+                            f"成功读取 {ok}/{len(readings)} 个设备"
                             + ("" if state["auto"] else "   （自动刷新已关闭）"))
         state["busy"] = False
         btn.configure(state="normal")
@@ -425,8 +479,8 @@ def build_ui():
             readings = read_all()
         except Exception:
             traceback.print_exc()
-            readings = [Reading("ATK 鼠标", "", error="读取异常"),
-                        Reading("DARKRIM 耳机", "", error="读取异常")]
+            readings = [Reading(c.lab_title["text"], "", error="读取异常")
+                        for c in cards]
         results.put(("readings", readings))
 
     def refresh():
@@ -434,7 +488,7 @@ def build_ui():
             return
         state["busy"] = True
         btn.configure(state="disabled")
-        foot.configure(text="正在读取…（耳机的协议要几秒钟）")
+        foot.configure(text="正在读取…（设备休眠时需要几秒钟）")
         threading.Thread(target=worker, daemon=True).start()
 
     def _reschedule():

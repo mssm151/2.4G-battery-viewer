@@ -9,8 +9,9 @@ tray_debug.log
 _dbg*.txt
 _hidcap.log
 
-# 个人设置（刷新间隔 / 开机自启开关）
+# 个人设置（刷新间隔 / 开机自启开关 / 手动标定协议）
 tray_config.json
+protocols_user.json
 
 # 编辑器 / 系统
 .vscode/
