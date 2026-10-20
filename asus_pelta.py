@@ -68,10 +68,24 @@ class PeltaInfo:
         return CHARGING_TEXT.get(self.charging, f"状态 {self.charging}")
 
 
-def find_interface() -> Optional[HidInterface]:
+_iface: Optional[HidInterface] = None
+
+
+def _invalidate() -> None:
+    global _iface
+    _iface = None
+
+
+def find_interface(refresh: bool = False) -> Optional[HidInterface]:
+    """缓存接口路径；枚举 HID 一次约 100+ms，没必要每轮都做。"""
+    global _iface
+    if _iface is not None and not refresh:
+        return _iface
+    _iface = None
     for it in hw.enumerate_hid():
-        if (it.vid in (VID,) and it.pid in PIDS
+        if (it.vid == VID and it.pid in PIDS
                 and it.usage_page == USAGE_PAGE and it.usage == USAGE):
+            _iface = it
             return it
     return None
 
@@ -127,6 +141,7 @@ def read_info(timeout: float = 0.8) -> PeltaInfo:
                 if len(charging) > 4:
                     info.charging = charging[4]
     except HidError as e:
+        _invalidate()                       # 可能被拔插过，下次重新枚举
         info.detail = f"打开接收器失败：{e}"
     return info
 

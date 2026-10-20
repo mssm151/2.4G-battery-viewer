@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""tray_app.py —— 托盘电量监视器（纯 ctypes，无第三方依赖）
+"""tray_app.py —— 托盘电量监视器（Python 回退版，纯 ctypes 无第三方依赖）
+
+默认优先使用原生 `tray_native.exe`；只有它不存在时才回退到这个 Python 版。
+两者窗口类 / 互斥名 / 窗口消息完全一致，面板无需区分。
 
 界面约定
 --------
-* 通知区域三个图标：雷柏 VT7（鼠标）、惠普 GT87（键盘）、ROG 破风（耳机）。
-  默认是「圆角正方形电量环 + 中间直角像素设备图标」，可在简洁界面里取消
-  「托盘图标显示设备类型」改回数字图标。
-  图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
+* 通知区域一个图标：三个同心圆角方形环，每圈代表一台设备（内/中/外
+  与设备的对应关系在简洁界面里设置）。
+  每圈颜色随该设备电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
 * **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
 * 左键图标 → 立刻刷新一次。
 * 悬停显示 tooltip：设备名 + 电量 + 更新时间。
@@ -157,12 +159,10 @@ KERNEL32.CreateMutexW.restype = ctypes.c_void_p
 KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
                                   wintypes.LPCWSTR]
 
-TRAY_ICONS = [
-    # (uID, key, 提示名, 是否带底板, 设备类型)
-    (1, "rapoo", "雷柏 VT7", False, "mouse"),
-    (2, "hp", "惠普 GT87", False, "keyboard"),
-    (3, "asus", "ROG 破风", False, "headset"),
-]
+TRAY_UID = 1
+DEVICE_KEYS = ("rapoo", "hp", "asus")
+DEVICE_TITLES = {"rapoo": "雷柏 VT7", "hp": "惠普 GT87",
+                 "asus": "ROG 破风"}
 
 
 # --------------------------------------------------------------------------
@@ -197,8 +197,7 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
-        self.levels = {k: (None, "正在读取…", "")
-                       for _, k, _, _, _ in TRAY_ICONS}
+        self.levels = {k: (None, "正在读取…", "") for k in DEVICE_KEYS}
         self.icons_added = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
@@ -216,16 +215,6 @@ class TrayApp:
             print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
 
     # ---- 图标 ----------------------------------------------------------
-    @staticmethod
-    def _color(level: Optional[int]) -> tuple[int, int, int]:
-        if level is None:
-            return (150, 155, 160)
-        if level >= 60:
-            return (93, 220, 138)
-        if level >= 30:
-            return (245, 196, 81)
-        return (255, 107, 107)
-
     def _nid(self, uID: int):
         nid = NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
@@ -235,40 +224,41 @@ class TrayApp:
         nid.uCallbackMessage = MSG_TRAY_CALLBACK
         return nid
 
-    def _apply_icon(self, action: int, uID: int, key: str, title: str,
-                    plate: bool, device: str) -> bool:
-        level, err, status = self.levels[key]
-        text = str(level) if level is not None else "--"
-        nid = self._nid(uID)
-        nid.hIcon = win_icon.make_hicon(
-            text, self._color(level), plate, device=device,
-            show_device=bool(self.cfg.get("show_device_icon", True)))
-        if level is not None:
-            extra = f"（{status}）" if status else ""
-            nid.szTip = (f"{title}：{level}%{extra}"
-                         f"（{time.strftime('%H:%M:%S')} 更新）")
-        else:
-            nid.szTip = f"{title}：{err or '未知'}"
+    def _tip_text(self, order: list[str]) -> str:
+        lines = []
+        for key in order:                     # 内 -> 中 -> 外
+            level, err, status = self.levels[key]
+            name = DEVICE_TITLES[key]
+            if level is None:
+                lines.append(f"{name}：暂无数据")
+            else:
+                extra = f" {status}" if status else ""
+                lines.append(f"{name}：{level}%{extra}")
+        return "\n".join(lines)
+
+    def _apply_icon(self, action: int) -> bool:
+        order = tc.ring_order(self.cfg)
+        levels = [self.levels[k][0] for k in order]
+        nid = self._nid(TRAY_UID)
+        nid.hIcon = win_icon.make_multi_hicon(levels)
+        nid.szTip = self._tip_text(order)[:127]
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
     def add_icons(self) -> None:
-        for uID, key, title, plate, device in TRAY_ICONS:
-            ok = self._apply_icon(NIM_ADD, uID, key, title, plate, device)
-            self.log(f"NIM_ADD {title} -> {'ok' if ok else '失败'}")
+        ok = self._apply_icon(NIM_ADD)
+        self.log(f"NIM_ADD 三环图标 -> {'ok' if ok else '失败'}")
         self.icons_added = True
 
     def update_icons(self) -> None:
         if not self.icons_added:
             self.add_icons()
             return
-        for uID, key, title, plate, device in TRAY_ICONS:
-            self._apply_icon(NIM_MODIFY, uID, key, title, plate, device)
+        self._apply_icon(NIM_MODIFY)
 
     def remove_icons(self) -> None:
-        for uID, _, _, _, _ in TRAY_ICONS:
-            nid = self._nid(uID)
-            nid.uFlags = 0
-            SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+        nid = self._nid(TRAY_UID)
+        nid.uFlags = 0
+        SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
         self.icons_added = False
 
     # ---- 定时器 / 刷新 --------------------------------------------------
@@ -286,15 +276,13 @@ class TrayApp:
         """
         new = tc.load_config()
         changed = new["interval"] != self.cfg["interval"]
-        icon_changed = (bool(new.get("show_device_icon", True))
-                        != bool(self.cfg.get("show_device_icon", True)))
+        ring_changed = tc.ring_order(new) != tc.ring_order(self.cfg)
         self.cfg = new
         if changed:
             self.log(f"刷新间隔 -> {new['interval']} 秒")
             self.apply_timer()
-        if icon_changed:
-            self.log("托盘设备图标 -> " +
-                     ("开" if new.get("show_device_icon", True) else "关"))
+        if ring_changed:
+            self.log("电量环顺序已更新")
             self.update_icons()
 
         actual = tc.is_autostart_enabled()
@@ -456,7 +444,7 @@ def main() -> int:
         if tc.is_tray_running():
             # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里三个数字图标就是它；右键图标打开界面）")
+            print("已经在运行了（托盘里一个三环图标就是它；右键图标打开界面）")
             return 0
         # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
         tc.cleanup_zombie()

@@ -8,8 +8,8 @@
 
 新样式全部按整数像素直接绘制，**不做抗锯齿**，16px 下也不会发糊。
 设备图标是 6–8px 的直角像素点阵（宽高均为偶数，保证整数居中），按整数倍放大。
-ICO 内含 16/20/24/28/32/36/40/48/56/64 多种尺寸，并按系统托盘实际
-尺寸加载，避免 Windows 缩放导致模糊。
+运行时按系统托盘的实际尺寸只生成一张 ICO，避免 Windows 缩放和多尺寸渲染；
+预览工具仍会生成 16–64px 的各种尺寸方便检查。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import math
 import os
 import struct
 import tempfile
+from collections import OrderedDict
 from ctypes import wintypes
 from typing import Optional
 
@@ -237,6 +238,39 @@ def render_tray_rgba(text: str, size: int, color: tuple[int, int, int],
     return bytes(px)
 
 
+def level_color(level: Optional[int]):
+    if level is None or level < 0:
+        return (150, 155, 160)
+    if level >= 60:
+        return (93, 220, 138)
+    if level >= 30:
+        return (245, 196, 81)
+    return (255, 107, 107)
+
+
+def render_multi_rgba(levels: list[Optional[int]], size: int) -> bytes:
+    """一个图标里三个同心圆角方形环：levels = [内圈, 中圈, 外圈]。"""
+    px = bytearray(size * size * 4)
+    thick = 1 if size <= 24 else (2 if size <= 48 else 3)
+    gap = 1 if size <= 24 else (2 if size <= 48 else 4)
+    margins = [1.0, 1.0 + thick + gap, 1.0 + 2 * (thick + gap)]
+    track = (78, 82, 88)
+    for layer, level in enumerate(levels):
+        margin = margins[2 - layer]          # margins[0]=外圈
+        radius = max(1.5, (size / 2 - margin) * 0.25)
+        pixels = _rounded_rect_pixels(size, margin, radius, thick)
+        for x, y, _ in pixels:
+            _put(px, size, x, y, (*track, 255))
+        if level is None or level <= 0:
+            continue
+        color = level_color(level)
+        limit = 360.0 * min(level, 100) / 100.0
+        for x, y, ang in pixels:
+            if ang <= limit:
+                _put(px, size, x, y, (*color, 255))
+    return bytes(px)
+
+
 def build_ico(pngs: list[tuple[int, bytes]]) -> bytes:
     """把多张 RGBA 位图打包成 ICO 文件内容。"""
     entries = []
@@ -280,9 +314,10 @@ user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 
 SM_CXSMICON, SM_CYSMICON = 49, 50
 
-# 常见 DPI 下的托盘图标尺寸（100% → 16，125% → 20 … 400% → 64）
+# 预览用的常见 DPI 尺寸；运行时 make_hicon 只渲染系统实际需要的那一张
 SIZES = (16, 20, 24, 28, 32, 36, 40, 48, 56, 64)
-_icon_cache: dict[tuple, int] = {}
+_icon_cache: "OrderedDict[tuple, int]" = OrderedDict()
+_MAX_CACHE = 24          # 电量变化会不断产生新图标，限制缓存避免 HICON 越攒越多
 _tmp_dir: Optional[str] = None
 
 
@@ -301,16 +336,19 @@ def make_hicon(text: str, color: tuple[int, int, int], plate: bool = False,
     # 按系统托盘图标的实际尺寸加载，避免 Windows 把 32px 缩放成 16px 发糊
     sw = user32.GetSystemMetrics(SM_CXSMICON) or 16
     sh = user32.GetSystemMetrics(SM_CYSMICON) or sw
+    side = max(sw, sh)
     key = (text, color, plate, device, show_device, sw, sh)
     if key in _icon_cache:
+        _icon_cache.move_to_end(key)
         return _icon_cache[key]
-    images = [(s, render_tray_rgba(text, s, color, device, show_device, plate))
-              for s in SIZES]
+    # 只渲染当前需要的尺寸：托盘一次只用一张图，没必要生成 10 份
+    images = [(side, render_tray_rgba(text, side, color, device,
+                                      show_device, plate))]
     ico = build_ico(images)
     path = os.path.join(
         _ensure_tmp(),
         f"ico_{text}_{color[0]:02x}{color[1]:02x}{color[2]:02x}"
-        f"_{int(plate)}_{device or 'none'}_{int(show_device)}.ico")
+        f"_{int(plate)}_{device or 'none'}_{int(show_device)}_{side}.ico")
     try:
         with open(path, "wb") as f:
             f.write(ico)
@@ -318,7 +356,52 @@ def make_hicon(text: str, color: tuple[int, int, int], plate: bool = False,
         return 0
     h = user32.LoadImageW(None, path, IMAGE_ICON, sw, sh, LR_LOADFROMFILE)
     hicon = int(h) if h else 0
+    try:
+        os.remove(path)              # LoadImage 已读入内存，临时文件不用留
+    except OSError:
+        pass
     _icon_cache[key] = hicon
+    while len(_icon_cache) > _MAX_CACHE:
+        _, old = _icon_cache.popitem(last=False)
+        if old:
+            try:
+                user32.DestroyIcon(ctypes.c_void_p(old))
+            except Exception:
+                pass
+    return hicon
+
+
+def make_multi_hicon(levels: list[Optional[int]]) -> int:
+    """三环图标（内/中/外三台设备），按系统托盘实际尺寸生成。"""
+    sw = user32.GetSystemMetrics(SM_CXSMICON) or 16
+    sh = user32.GetSystemMetrics(SM_CYSMICON) or sw
+    side = max(sw, sh)
+    key = (tuple(levels), sw, sh)
+    if key in _icon_cache:
+        _icon_cache.move_to_end(key)
+        return _icon_cache[key]
+    ico = build_ico([(side, render_multi_rgba(levels, side))])
+    tag = "_".join("x" if v is None else str(v) for v in levels)
+    path = os.path.join(_ensure_tmp(), f"icon_multi_{tag}_{side}.ico")
+    try:
+        with open(path, "wb") as f:
+            f.write(ico)
+    except OSError:
+        return 0
+    h = user32.LoadImageW(None, path, IMAGE_ICON, sw, sh, LR_LOADFROMFILE)
+    hicon = int(h) if h else 0
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    _icon_cache[key] = hicon
+    while len(_icon_cache) > _MAX_CACHE:
+        _, old = _icon_cache.popitem(last=False)
+        if old:
+            try:
+                user32.DestroyIcon(ctypes.c_void_p(old))
+            except Exception:
+                pass
     return hicon
 
 

@@ -1,7 +1,10 @@
 # 设备电量查看器
 
-Windows 上读取 2.4G 无线外设电量的小工具。**纯 ctypes 调系统 DLL，零第三方依赖**——
-不用 hidapi、不用 pystray、不用 Pillow、不用 pywin32，装了 Python 就能跑。
+Windows 上读取 2.4G 无线外设电量的小工具。
+
+- **简洁面板**：纯 Python + ctypes，零第三方依赖（不用 hidapi / pystray / Pillow / pywin32）。
+- **常驻托盘**：原生 C++/Win32（MinGW 静态编译，单 exe），私有内存约 **2.3MB**、CPU 近 0；
+  找不到 `tray_native.exe` 时自动回退到 Python 版 `tray_app.py`。
 
 ## 当前适配的三台设备
 
@@ -29,11 +32,16 @@ python my_devices.py
 底部可以改刷新间隔。
 
 - 只想看一眼：`python my_devices.py --once` —— 打印后退出
-- 托盘常驻：`pythonw tray_app.py` —— 三个图标，左键刷新、右键打开面板；
-  排查问题用 `python tray_app.py --debug`
-- 托盘图标默认是「圆角正方形电量环 + 中间直角像素设备图标」
-  （鼠标 / 键盘 / 耳机），面板设置里可以取消「托盘图标显示设备类型」，
-  改回数字图标；tooltip 始终显示电量百分比和充电状态
+- 托盘常驻：先构建 `tray_native.exe`，然后直接运行它；面板里的
+  「启动托盘程序」会自动优先用原生版，找不到时回退 `pythonw tray_app.py`
+- 构建原生托盘：`powershell -ExecutionPolicy Bypass -File build_tray.ps1`
+  （需要 MinGW g++；静态链接，无运行时依赖）
+- 如果之前已经开启过开机自启，构建原生托盘后请重新勾选一次「开机自启」，
+  让启动文件夹里的快捷方式指向 `tray_native.exe`（程序不会自动改已有的启动项）
+- 原生托盘排查：`tray_native.exe --debug`、`--once`（读一次三台设备）、`--quit`
+- 托盘只有一个图标：三个同心圆角方形环，每圈独立表示一台设备的电量；
+  内 / 中 / 外与设备的对应关系在面板设置里配置。悬停 tooltip 按环顺序
+  列出三台设备的电量和充电状态
 - 想摸新设备的协议：`python app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
 
 ## 用 prompt 做一份你自己的
@@ -173,6 +181,7 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 
 - Windows 10 / 11
 - Python 3.10+（需要 `tkinter`，官方安装包默认自带）
+- MinGW-w64 g++（仅构建原生托盘需要；不构建时自动使用 Python 回退托盘）
 
 ## 目录说明
 
@@ -186,9 +195,12 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 | `darkrim_proto.py` | 旧版 DARKRIM 杰理方案私有协议（保留） |
 | `bt_battery.py` | 蓝牙耳机 HFP 电量（未公开 PnP 属性） |
 | `my_devices.py` | **主界面**（三台设备简洁面板） |
-| `tray_app.py` | 托盘程序：三台设备三个图标，数字随电量变色，tooltip 显示充电状态 |
-| `tray_common.py` | 配置、开机自启、进程间消息 |
-| `win_icon.py` | 托盘图标：圆角正方形电量环 + 直角像素设备图标（纯 Python 硬边绘制）→ ICO → HICON |
+| `tray_native.cpp` | **原生托盘源码**（C++/Win32：HID、图标、单实例、窗口消息） |
+| `build_tray.ps1` | 用 MinGW g++ 静态编译 `tray_native.exe` |
+| `tray_native.exe` | 原生托盘构建产物（不入库，用脚本生成；缺失时回退 Python） |
+| `tray_app.py` | Python 回退托盘（找不到原生 exe 时使用） |
+| `tray_common.py` | 配置、开机自启、进程间消息（原生 / Python 托盘共用） |
+| `win_icon.py` | Python 回退版的图标绘制（三个同心电量环）→ ICO → HICON |
 | `win_link.py` | 软连接：符号链接 / 目录 junction / 硬链接，按权限自动降级 |
 | `win_shell.py` | 已知文件夹路径 + 用 ctypes COM 创建 `.lnk` |
 | `app.py` | 完整调试版界面 |
@@ -202,6 +214,27 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
    「窗口和图标都没了、但进程还活着」的僵尸进程，它占着单实例锁，导致之后再启动都没反应。
 
 更多坑见 [PROMPT.md](PROMPT.md)。
+
+## 性能
+
+### 原生托盘（默认）
+
+- 私有内存约 **2.3MB**，WorkingSet 约 12MB，60 秒空闲 + 一次刷新 CPU 增量 **0**；
+  单文件 exe 约 241KB。
+- 三个设备读取在后台线程；惠普 / ROG 通常 100ms 内先更新，雷柏休眠时最多等 6.5 秒，
+  但不会拖慢另外两台。
+- 雷柏有常驻监听线程，缓存最新推送报文；刷新接近 0 延迟，新报文到达会立刻更新图标。
+- 图标只在三台电量 / 环顺序 / 尺寸变化时重绘，其余刷新只更新 tooltip。
+- 与 Python 面板共用窗口类、互斥名、消息名和 `tray_config.json`，面板无需区分。
+
+### Python 回退版
+
+- HID 枚举一次约 100+ms：三个设备模块会缓存接口路径，正常刷新不再重复枚举；
+  只有设备拔插导致打开失败时才重新枚举。
+- 托盘图标按系统实际托盘尺寸只渲染一张，临时 ICO 在 `LoadImageW` 之后立即删除。
+- HICON 使用 LRU 缓存（上限 24 个），电量变化不会让 GDI 句柄无限增长。
+- 设备读取在后台线程，Rapoo 的等待阻塞在 HID 事件上，不占 CPU。
+  实测 60 秒空闲 + 一次刷新，CPU 增量小于 0.02 秒，WorkingSet 稳定在约 28MB。
 
 ## 隐私
 

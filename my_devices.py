@@ -256,8 +256,8 @@ def build_ui():
     root = tk.Tk()
     root.title(tc.UI_TITLE)
     root.configure(bg=BG)
-    root.geometry("1060x500")
-    root.minsize(980, 460)
+    root.geometry("1060x560")
+    root.minsize(980, 520)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -294,6 +294,7 @@ def build_ui():
     results: "queue.Queue[tuple]" = queue.Queue()
 
     cfg = tc.load_config()
+    tc.save_config(cfg)          # 顺便写入 pythonw 路径，原生托盘打开面板要用
     state["interval"] = int(cfg["interval"])
 
     # ---- 顶部 ----
@@ -336,11 +337,17 @@ def build_ui():
     setbar = ttk.Frame(root, style="Panel.TFrame", padding=(14, 10))
     setbar.pack(fill="x", padx=18, pady=(2, 8))
 
+    def _set_tray_label(text: str) -> None:
+        """每秒轮询时只在文字变化时更新控件，避免无意义的 Tk 重绘。"""
+        if state.get("_tray_label") != text:
+            state["_tray_label"] = text
+            lab_tray.configure(text=text)
+
     def refresh_tray_state():
         if state.get("starting"):
             return                              # 正在启动，别覆盖提示文字
         if state.get("notice") and time.time() < state.get("notice_until", 0):
-            lab_tray.configure(text=state["notice"])   # 临时提示优先显示
+            _set_tray_label(state["notice"])    # 临时提示优先显示
             btn_tray.configure(state="normal",
                                text="退出托盘程序" if tc.is_tray_running()
                                else "启动托盘程序")
@@ -349,8 +356,8 @@ def build_ui():
         running = tc.is_tray_running()
         btn_tray.configure(state="normal",
                            text="退出托盘程序" if running else "启动托盘程序")
-        lab_tray.configure(text="托盘运行中：右键托盘图标即可打开本窗口"
-                                if running else "托盘未运行：不会后台自动刷新")
+        _set_tray_label("托盘运行中：右键托盘图标即可打开本窗口"
+                        if running else "托盘未运行：不会后台自动刷新")
 
     def notify(text: str, seconds: float = 8.0) -> None:
         """在状态标签上显示一条临时提示。"""
@@ -455,22 +462,39 @@ def build_ui():
     ttk.Checkbutton(row_a, text="开机自启（任务管理器可见）", variable=v_boot,
                     command=on_boot).pack(side="left", padx=(18, 0))
 
-    v_device_icon = tk.BooleanVar(
-        value=bool(cfg.get("show_device_icon", True)))
+    # 三圈与设备的对应关系：内圈 / 中圈 / 外圈
+    order = tc.ring_order(cfg)
+    ring_vars = [tk.StringVar(value=tc.RING_LABELS[k]) for k in order]
 
-    def on_device_icon():
-        cfg["show_device_icon"] = bool(v_device_icon.get())
+    def on_ring_change(changed: int):
+        keys = []
+        for var in ring_vars:
+            keys.append(next(k for k, v in tc.RING_LABELS.items()
+                             if v == var.get()))
+        for j, k in enumerate(keys):
+            if j != changed and k == keys[changed]:
+                keys[j], keys[changed] = keys[changed], keys[j]
+                break
+        for var, k in zip(ring_vars, keys):
+            var.set(tc.RING_LABELS[k])
+        cfg["ring_inner"], cfg["ring_middle"], cfg["ring_outer"] = keys
         tc.save_config(cfg)
         tc.post_to_tray(tc.MSG_RELOAD)
-        state = "设备图标" if cfg["show_device_icon"] else "电量数字"
-        if tc.is_tray_running():
-            notify(f"托盘图标已切换为{state}", 6)
-        else:
-            notify(f"设置已保存：托盘图标将显示{state}", 6)
 
-    ttk.Checkbutton(row_a, text="托盘图标显示设备类型",
-                    variable=v_device_icon,
-                    command=on_device_icon).pack(side="left", padx=(18, 0))
+    row_c = ttk.Frame(setbar, style="Panel.TFrame")
+    row_c.pack(fill="x", pady=(8, 0))
+    ttk.Label(row_c, text="电量环", style="CardTitle.TLabel").pack(side="left")
+    for i, text in enumerate(("内圈", "中圈", "外圈")):
+        ttk.Label(row_c, text=text, style="CardSub.TLabel").pack(
+            side="left", padx=(14 if i == 0 else 8, 4))
+        combo = ttk.Combobox(row_c, textvariable=ring_vars[i], width=11,
+                             state="readonly",
+                             values=list(tc.RING_LABELS.values()))
+        combo.pack(side="left")
+        combo.bind("<<ComboboxSelected>>",
+                   lambda _e, idx=i: on_ring_change(idx))
+    ttk.Label(row_c, text="（每圈代表一台设备）",
+              style="CardSub.TLabel").pack(side="left", padx=(12, 0))
 
     btn_tray = ttk.Button(row_b, text="退出托盘程序", command=on_tray_toggle)
     btn_tray.pack(side="right")

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """tray_common.py —— 托盘程序与界面共用的配置 / 开机自启 / 进程间通信
 
-托盘程序（tray_app.py）和简洁界面（my_devices.py）是两个进程，
-共用这里的配置文件与窗口消息，界面里改设置后能立刻通知托盘生效。
+托盘和简洁界面（my_devices.py）是两个进程，共用这里的配置文件与窗口消息。
+托盘优先使用原生 `tray_native.exe`；不存在时回退到 Python 版 `tray_app.py`。
+两者窗口类、互斥名、消息名完全一致，界面无需关心用的是哪一个。
 """
 
 from __future__ import annotations
@@ -28,11 +29,27 @@ MUTEX_NAME = "Global\\DeviceBatteryTray_single_instance"
 # 界面标题（托盘用它来找到已打开的窗口）
 UI_TITLE = "我的设备电量"
 
+RING_KEYS = ("rapoo", "hp", "asus")
+RING_LABELS = {"rapoo": "雷柏 VT7", "hp": "惠普 GT87", "asus": "ROG 破风"}
+DEFAULT_RING = ("rapoo", "hp", "asus")
+
 DEFAULT_CONFIG = {
     "interval": 60,          # 托盘轮询间隔（秒）
     "autostart": True,       # 开机自启
-    "show_device_icon": True,  # 托盘圆形电量中间显示设备图标（否则显示数字）
+    # 三圈分别代表哪台设备：内 -> 中 -> 外
+    "ring_inner": DEFAULT_RING[0],
+    "ring_middle": DEFAULT_RING[1],
+    "ring_outer": DEFAULT_RING[2],
 }
+
+
+def ring_order(cfg: dict) -> list[str]:
+    """返回 [内圈, 中圈, 外圈] 的设备 key；非法配置回退默认顺序。"""
+    order = [cfg.get("ring_inner"), cfg.get("ring_middle"),
+             cfg.get("ring_outer")]
+    if sorted(order) != sorted(RING_KEYS):
+        return list(DEFAULT_RING)
+    return order
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
                     (300, "5 分钟"), (600, "10 分钟"), (1800, "30 分钟")]
@@ -69,11 +86,16 @@ def load_config() -> dict:
                     cfg[k] = data[k]
     except Exception:
         pass
+    # 原生托盘需要知道用哪个 pythonw 打开面板
+    cfg["pythonw"] = pythonw_path()
+    order = ring_order(cfg)
+    cfg["ring_inner"], cfg["ring_middle"], cfg["ring_outer"] = order
     return cfg
 
 
 def save_config(cfg: dict) -> None:
     clean = {k: cfg.get(k, DEFAULT_CONFIG[k]) for k in DEFAULT_CONFIG}
+    clean["pythonw"] = pythonw_path()
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
@@ -97,8 +119,21 @@ def tray_script() -> str:
     return os.path.join(BASE_DIR, "tray_app.py")
 
 
+def native_tray_path() -> str:
+    return os.path.join(BASE_DIR, "tray_native.exe")
+
+
+def tray_launch() -> tuple[str, str]:
+    """返回 (可执行文件, 参数)。优先原生托盘，缺失时回退 Python 版。"""
+    native = native_tray_path()
+    if os.path.isfile(native):
+        return native, ""
+    return pythonw_path(), f'"{tray_script()}"'
+
+
 def autostart_command() -> str:
-    return f'"{pythonw_path()}" "{tray_script()}"'
+    target, args = tray_launch()
+    return f'"{target}"' + (f" {args}" if args else "")
 
 
 STARTUP_LNK_NAME = "电量托盘.lnk"
@@ -206,11 +241,12 @@ def set_autostart(enabled: bool) -> bool:
     能直接看到它（名字就是 电量托盘），并且可以在那里直接启用/禁用。
     """
     if enabled:
+        target, args = tray_launch()
         ok = win_shell.create_shortcut(
-            startup_lnk(), pythonw_path(),
-            arguments=f'"{tray_script()}"',
+            startup_lnk(), target,
+            arguments=args,
             workdir=BASE_DIR,
-            description="设备电量托盘：常驻显示 ATK 鼠标 / DARKRIM 耳机电量")
+            description="设备电量托盘：雷柏 VT7 / 惠普 GT87 / ROG 破风")
         _set_startup_approved(True)
     else:
         _clear_startup_approved()
@@ -327,9 +363,11 @@ def start_tray_app(wait_timeout: float = 6.0) -> bool:
     if is_tray_running():
         return True
     cleanup_zombie()
+    native = native_tray_path()
+    cmd = [native] if os.path.isfile(native) else \
+        [pythonw_path(), tray_script()]
     try:
-        subprocess.Popen([pythonw_path(), os.path.join(BASE_DIR, "tray_app.py")],
-                         cwd=BASE_DIR, creationflags=0x00000008)
+        subprocess.Popen(cmd, cwd=BASE_DIR, creationflags=0x00000008)
     except Exception:
         return False
     return wait_for_tray(wait_timeout)
@@ -468,8 +506,8 @@ def cleanup_zombie(wait: float = 2.0) -> bool:
     """清理僵尸托盘进程：上一个实例还活着（占着单实例锁），但窗口已经销毁。
 
     双重确认后才动手，避免 PID 复用误杀无辜进程：
-      1) 镜像名以 "python" 开头；
-      2) 命令行里确实有 tray_app。
+      1) 镜像名是 tray_native.exe；或
+      2) 镜像名以 "python" 开头且命令行里确实有 tray_app。
     任一不满足就只清掉自己的 pid 文件，绝不碰那个进程。
     """
     import time
@@ -481,7 +519,9 @@ def cleanup_zombie(wait: float = 2.0) -> bool:
         return False
     image = os.path.basename(process_image(pid)).lower()
     cmd = process_cmdline(pid).lower()
-    if not (image.startswith("python") and "tray_app" in cmd):
+    is_native = image == "tray_native.exe"
+    is_python = image.startswith("python") and "tray_app" in cmd
+    if not (is_native or is_python):
         remove_pid()
         return False
     if not kill_pid(pid):
