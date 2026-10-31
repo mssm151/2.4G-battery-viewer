@@ -25,8 +25,10 @@ import hid_win as hw
 import darkrim_proto as drp
 from hid_win import HidDevice, HidError, HidInterface, HidP_Feature, HidP_Input
 
-USER_PROTOCOL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                  "protocols_user.json")
+# 手动标定数据放项目根，与 tray_config.json 一致，代码目录保持干净
+_DEVICES_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE_DIR = os.path.dirname(os.path.dirname(_DEVICES_DIR))
+USER_PROTOCOL_FILE = os.path.join(_BASE_DIR, "protocols_user.json")
 
 
 # --------------------------------------------------------------------------

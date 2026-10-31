@@ -2,11 +2,11 @@
 """
 设备电量查看器 —— 读取 2.4G 无线外设（鼠标 / 键盘 / 耳机 / 手柄）的电量
 
-用法：
-    python app.py            启动图形界面
-    python app.py --list     命令行列出所有 HID 设备与接口
-    python app.py --battery  命令行读取所有设备电量
-    python app.py --dump     命令行转储所有 Feature Report
+用法（在项目根目录执行）：
+    python src\tools\app.py            启动图形界面
+    python src\tools\app.py --list     命令行列出所有 HID 设备与接口
+    python src\tools\app.py --battery  命令行读取所有设备电量
+    python src\tools\app.py --dump     命令行转储所有 Feature Report
 
 零第三方依赖：只用 ctypes 调用 Windows 自带的 hid.dll / setupapi.dll。
 """
@@ -14,12 +14,19 @@
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import sys
 import threading
 import time
 import traceback
 from typing import Optional
+
+# 以脚本方式运行时 sys.path[0] 只有本目录，把 src\devices 加进来
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEVICES_DIR = os.path.join(_SRC_DIR, "devices")
+if _DEVICES_DIR not in sys.path:
+    sys.path.insert(0, _DEVICES_DIR)
 
 import hid_win as hw
 import battery as bt

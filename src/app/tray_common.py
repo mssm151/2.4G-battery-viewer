@@ -18,7 +18,11 @@ from typing import Optional
 import win_link
 import win_shell
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 源码在 <root>\src\app，配置 / PID / 构建产物仍在项目根目录
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.dirname(APP_DIR)
+BASE_DIR = os.path.dirname(SRC_DIR)
+
 CONFIG_PATH = os.path.join(BASE_DIR, "tray_config.json")
 PID_FILE = os.path.join(BASE_DIR, "tray_pid.txt")
 
@@ -131,7 +135,12 @@ def pythonw_path() -> str:
 
 
 def tray_script() -> str:
-    return os.path.join(BASE_DIR, "tray_app.py")
+    return os.path.join(APP_DIR, "tray_app.py")
+
+
+def panel_script() -> str:
+    """简洁面板入口（原生托盘与 Python 托盘都用它打开界面）。"""
+    return os.path.join(APP_DIR, "my_devices.py")
 
 
 DIST_DIR = os.path.join(BASE_DIR, "dist")

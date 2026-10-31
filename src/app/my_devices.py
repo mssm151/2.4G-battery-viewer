@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """我的设备电量 —— 只显示 ATK 鼠标 + DARKRIM 耳机的简洁面板
 
-用法：
-    python my_devices.py            打开界面（默认自动刷新）
-    python my_devices.py --once     命令行读一次就退出
+用法（在项目根目录执行）：
+    python src\app\my_devices.py            打开界面（默认自动刷新）
+    python src\app\my_devices.py --once     命令行读一次就退出
 
 界面只有两块卡片，各显示一个设备的电量，可自动刷新。
 底层复用 battery.py / darkrim_proto.py 里已经验证过的协议。
@@ -12,12 +12,20 @@
 from __future__ import annotations
 
 import argparse
+import os
 import queue
+import sys
 import threading
 import time
 import traceback
 from dataclasses import dataclass
 from typing import Optional
+
+# 以脚本方式运行时 sys.path[0] 只有本目录，把 src\devices 加进来
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEVICES_DIR = os.path.join(_SRC_DIR, "devices")
+if _DEVICES_DIR not in sys.path:
+    sys.path.insert(0, _DEVICES_DIR)
 
 import asus_pelta as asp
 import hid_win as hw

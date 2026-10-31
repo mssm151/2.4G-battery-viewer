@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """tray_app.py —— 托盘电量监视器（Python 回退版，纯 ctypes 无第三方依赖）
 
-默认优先使用原生 `tray_native.exe`；只有它不存在时才回退到这个 Python 版。
+默认优先使用原生 `dist\tray_native.exe`；只有它不存在时才回退到这个 Python 版。
 两者窗口类 / 互斥名 / 窗口消息完全一致，面板无需区分。
 
 界面约定
@@ -21,11 +21,11 @@
 * **不写日志文件**：只有 `--debug` 时才往控制台打印。
 * 全 ctypes 调 shell32/user32，不依赖 pystray / Pillow。
 
-启动：
-    pythonw tray_app.py        # 静默驻留（开机自启用的就是这个）
-    python  tray_app.py --debug   # 前台运行并打印过程信息（排查问题用）
-    python  tray_app.py --status
-    python  tray_app.py --quit
+启动（在项目根目录执行）：
+    pythonw src\app\tray_app.py        # 静默驻留（开机自启用的就是这个）
+    python  src\app\tray_app.py --debug   # 前台运行并打印过程信息（排查问题用）
+    python  src\app\tray_app.py --status
+    python  src\app\tray_app.py --quit
 """
 
 from __future__ import annotations
@@ -40,6 +40,12 @@ import time
 import traceback
 from ctypes import wintypes
 from typing import Optional
+
+# 以脚本方式运行时 sys.path[0] 只有本目录，把 src\devices 加进来
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEVICES_DIR = os.path.join(_SRC_DIR, "devices")
+if _DEVICES_DIR not in sys.path:
+    sys.path.insert(0, _DEVICES_DIR)
 
 import hid_win as hw
 import asus_pelta as asp
@@ -413,9 +419,8 @@ class TrayApp:
             return
         import subprocess
         try:
-            subprocess.Popen([tc.pythonw_path(),
-                              os.path.join(BASE_DIR, "my_devices.py")],
-                             cwd=BASE_DIR, creationflags=0x00000008)
+            subprocess.Popen([tc.pythonw_path(), tc.panel_script()],
+                             cwd=tc.BASE_DIR, creationflags=0x00000008)
             self.log("已打开简洁界面")
         except Exception as e:
             self.log(f"打开界面失败：{e}")
