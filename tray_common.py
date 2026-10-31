@@ -51,6 +51,21 @@ def ring_order(cfg: dict) -> list[str]:
         return list(DEFAULT_RING)
     return order
 
+
+def set_ring(order: list[str], index: int, key: str) -> list[str]:
+    """把第 index 圈改成 key；若 key 已在别的圈，交换两圈，保持有效排列。"""
+    order = list(order)
+    if sorted(order) != sorted(RING_KEYS):
+        order = list(DEFAULT_RING)
+    if index not in (0, 1, 2) or key not in RING_KEYS:
+        return order
+    if order[index] == key:
+        return order
+    j = order.index(key)
+    order[index], order[j] = order[j], order[index]
+    return order
+
+
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
                     (300, "5 分钟"), (600, "10 分钟"), (1800, "30 分钟")]
 
@@ -119,7 +134,14 @@ def tray_script() -> str:
     return os.path.join(BASE_DIR, "tray_app.py")
 
 
+DIST_DIR = os.path.join(BASE_DIR, "dist")
+
+
 def native_tray_path() -> str:
+    """原生托盘路径：构建产物在 dist\\，兼容旧的根目录位置。"""
+    p = os.path.join(DIST_DIR, "tray_native.exe")
+    if os.path.isfile(p):
+        return p
     return os.path.join(BASE_DIR, "tray_native.exe")
 
 

@@ -9,7 +9,8 @@
 * 通知区域一个图标：三个同心圆角方形环，每圈代表一台设备（内/中/外
   与设备的对应关系在简洁界面里设置）。
   每圈颜色随该设备电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
-* **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
+* **右键图标 → 弹出菜单**：上面是「打开面板」（打开/前置简洁界面），
+  最下面是「退出」（完全关闭托盘进程）。
 * 左键图标 → 立刻刷新一次。
 * 悬停显示 tooltip：设备名 + 电量 + 更新时间。
 
@@ -43,6 +44,7 @@ from typing import Optional
 import hid_win as hw
 import asus_pelta as asp
 import hp_gt87 as hpg
+import rapoo_vt1 as rv1
 import rapoo_vt7 as rv
 import win_icon
 import tray_common as tc
@@ -57,6 +59,7 @@ KERNEL32 = tc.KERNEL32
 SHELL32 = ctypes.WinDLL("shell32", use_last_error=True)
 
 WM_DESTROY = 0x0002
+WM_COMMAND = 0x0111
 WM_TIMER = 0x0113
 WM_NULL = 0x0000
 WM_LBUTTONUP = 0x0202
@@ -68,6 +71,14 @@ MSG_REFRESH_DONE = WM_APP + 2
 
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
 NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x01, 0x02, 0x04
+
+# 托盘右键菜单项（与 tray_native.cpp 保持一致）
+IDM_OPEN_PANEL = 1001
+IDM_QUIT = 1002
+MF_STRING = 0x0000
+MF_SEPARATOR = 0x0800
+TPM_LEFTALIGN = 0x0000
+TPM_RIGHTBUTTON = 0x0002
 
 SW_RESTORE = 9
 
@@ -148,6 +159,22 @@ USER32.TranslateMessage.restype = wintypes.BOOL
 USER32.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
 USER32.DispatchMessageW.restype = ctypes.c_ssize_t
 USER32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
+USER32.CreatePopupMenu.restype = ctypes.c_void_p
+USER32.CreatePopupMenu.argtypes = []
+USER32.AppendMenuW.restype = wintypes.BOOL
+USER32.AppendMenuW.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                               ctypes.c_size_t, wintypes.LPCWSTR]
+USER32.DestroyMenu.restype = wintypes.BOOL
+USER32.DestroyMenu.argtypes = [ctypes.c_void_p]
+USER32.SetMenuDefaultItem.restype = wintypes.BOOL
+USER32.SetMenuDefaultItem.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                                      wintypes.UINT]
+USER32.GetCursorPos.restype = wintypes.BOOL
+USER32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+USER32.TrackPopupMenu.restype = wintypes.BOOL
+USER32.TrackPopupMenu.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                                  ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_void_p, ctypes.c_void_p]
 
 SHELL32.Shell_NotifyIconW.restype = wintypes.BOOL
 SHELL32.Shell_NotifyIconW.argtypes = [wintypes.DWORD,
@@ -187,6 +214,10 @@ def read_asus() -> tuple[Optional[int], str, str]:
     return _reading(asp.read_info(), "无回复（确认耳机已开机）")
 
 
+def read_vt1() -> tuple[Optional[int], str, str]:
+    return _reading(rv1.read_info(), "暂无数据")
+
+
 # --------------------------------------------------------------------------
 # 托盘程序
 # --------------------------------------------------------------------------
@@ -198,11 +229,48 @@ class TrayApp:
         self.wndproc_ref = None
         self.busy = False
         self.levels = {k: (None, "正在读取…", "") for k in DEVICE_KEYS}
+        self.extra = (None, "正在读取…", "")
         self.icons_added = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
         self.msg_reload = USER32.RegisterWindowMessageW(tc.MSG_RELOAD)
+        self._ux = self._init_uxtheme()
         self.log("启动，配置 = " + json.dumps(self.cfg, ensure_ascii=False))
+
+    # ---- Win11 主题（菜单跟随系统浅色/深色）------------------------------
+    @staticmethod
+    def _init_uxtheme():
+        """uxtheme 的未文档化入口：135=SetPreferredAppMode。
+
+        AllowDark(1) 只是允许深色，系统为浅色时菜单仍是浅色 —— 跟随系统。
+        """
+        try:
+            ux = ctypes.WinDLL("uxtheme")
+            set_pref = ux[135]
+            set_pref.restype = ctypes.c_int
+            set_pref.argtypes = [ctypes.c_int]
+            set_pref(1)
+            return ux
+        except Exception:
+            return None
+
+    def _apply_menu_theme(self) -> None:
+        if self._ux is None:
+            return
+        try:
+            allow = self._ux[133]              # AllowDarkModeForWindow
+            allow.restype = ctypes.c_int
+            allow.argtypes = [ctypes.c_void_p, wintypes.BOOL]
+            allow(self.hwnd, True)
+        except Exception:
+            pass
+        try:
+            flush = self._ux[136]              # FlushMenuThemes
+            flush.restype = None
+            flush.argtypes = []
+            flush()
+        except Exception:
+            pass
 
     # ---- 输出（默认不落盘）---------------------------------------------
     def log(self, msg: str) -> None:
@@ -226,7 +294,7 @@ class TrayApp:
 
     def _tip_text(self, order: list[str]) -> str:
         lines = []
-        for key in order:                     # 内 -> 中 -> 外
+        for key in order:                     # 内 -> 中 -> 外，按顺序列出
             level, err, status = self.levels[key]
             name = DEVICE_TITLES[key]
             if level is None:
@@ -234,6 +302,13 @@ class TrayApp:
             else:
                 extra = f" {status}" if status else ""
                 lines.append(f"{name}：{level}%{extra}")
+        lines.append("────────")
+        level, err, status = self.extra
+        if level is None:
+            lines.append("雷柏 VT1：暂无数据")
+        else:
+            extra = f" {status}" if status else ""
+            lines.append(f"雷柏 VT1：{level}%{extra}")
         return "\n".join(lines)
 
     def _apply_icon(self, action: int) -> bool:
@@ -306,6 +381,11 @@ class TrayApp:
             except Exception:
                 self.levels[key] = (None, "读取异常", "")
                 self.log(f"{key} 读取异常:\n" + traceback.format_exc())
+        try:
+            self.extra = read_vt1()
+        except Exception:
+            self.extra = (None, "读取异常", "")
+            self.log("VT1 读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     @staticmethod
@@ -320,7 +400,7 @@ class TrayApp:
         r, h, a = (self.levels["rapoo"], self.levels["hp"],
                    self.levels["asus"])
         self.log(f"刷新完成：雷柏={self._fmt(r)}  惠普={self._fmt(h)}  "
-                 f"ROG={self._fmt(a)}")
+                 f"ROG={self._fmt(a)}  VT1={self._fmt(self.extra)}")
         self.update_icons()
 
     # ---- 打开简洁界面 ---------------------------------------------------
@@ -340,6 +420,29 @@ class TrayApp:
         except Exception as e:
             self.log(f"打开界面失败：{e}")
 
+    # ---- 右键菜单 -------------------------------------------------------
+    def show_menu(self) -> None:
+        """右键托盘图标：上面「打开面板」，最下面「退出」。"""
+        self._apply_menu_theme()           # 按当前系统主题刷新菜单配色
+        menu = USER32.CreatePopupMenu()
+        if not menu:
+            return
+        try:
+            USER32.AppendMenuW(menu, MF_STRING, IDM_OPEN_PANEL, "打开面板")
+            USER32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            USER32.AppendMenuW(menu, MF_STRING, IDM_QUIT, "退出")
+            USER32.SetMenuDefaultItem(menu, IDM_OPEN_PANEL, 0)
+
+            pt = wintypes.POINT()
+            USER32.GetCursorPos(ctypes.byref(pt))
+            # 先把本窗口设为前台，否则任务栏上的托盘菜单点一下就会消失
+            USER32.SetForegroundWindow(self.hwnd)
+            USER32.TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+                                  pt.x, pt.y, 0, self.hwnd, None)
+        finally:
+            USER32.DestroyMenu(menu)
+        USER32.PostMessageW(self.hwnd, WM_NULL, 0, 0)  # 菜单关闭后补一条空消息
+
     def quit(self) -> None:
         self.log("退出")
         self.remove_icons()
@@ -357,10 +460,19 @@ class TrayApp:
         if msg == MSG_TRAY_CALLBACK:
             event = int(lparam) & 0xFFFF
             if event == WM_RBUTTONUP:
-                self.open_ui()                     # 右键：直接打开界面
+                self.show_menu()                   # 右键：弹出菜单
             elif event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
                 self.refresh_now()                 # 左键：立刻刷新
             return 0
+        if msg == WM_COMMAND:
+            cmd = int(wparam) & 0xFFFF
+            if cmd == IDM_OPEN_PANEL:
+                self.open_ui()
+                return 0
+            if cmd == IDM_QUIT:
+                # 推迟到菜单关闭之后再销毁窗口
+                USER32.PostMessageW(self.hwnd, self.msg_quit, 0, 0)
+                return 0
         if msg == MSG_REFRESH_DONE:
             self.on_refresh_done()
             return 0
@@ -444,7 +556,7 @@ def main() -> int:
         if tc.is_tray_running():
             # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里一个三环图标就是它；右键图标打开界面）")
+            print("已经在运行了（托盘里一个三环图标就是它；右键图标 → 打开面板 / 退出）")
             return 0
         # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
         tc.cleanup_zombie()

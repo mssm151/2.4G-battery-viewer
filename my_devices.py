@@ -22,6 +22,7 @@ from typing import Optional
 import asus_pelta as asp
 import hid_win as hw
 import hp_gt87 as hpg
+import rapoo_vt1 as rv1
 import rapoo_vt7 as rv
 import battery as bt
 import darkrim_proto as drp
@@ -159,8 +160,24 @@ def read_rog_pelta() -> Reading:
     return r
 
 
+def read_rapoo_vt1() -> Reading:
+    """雷柏 VT1 / VT1 Pro（24AE:1214）—— 只显示在面板/tooltip，不参与三环。"""
+    r = Reading("雷柏 VT1", "未连接")
+    info = rv1.read_info()
+    if not info.online:
+        r.error = info.detail or "没找到接收器"
+        return r
+    r.subtitle = "24AE:1214 · 2.4G 接收器"
+    r.level = info.level
+    r.detail = "雷柏推送（7 字节，不参与三环）"
+    if info.level is None:
+        r.error = info.detail or "暂无数据"
+    return r
+
+
 def read_all() -> list[Reading]:
-    return [read_rapoo_vt7(), read_hp_gt87(), read_rog_pelta()]
+    return [read_rapoo_vt7(), read_hp_gt87(), read_rog_pelta(),
+            read_rapoo_vt1()]
 
 
 # ==========================================================================
@@ -256,8 +273,8 @@ def build_ui():
     root = tk.Tk()
     root.title(tc.UI_TITLE)
     root.configure(bg=BG)
-    root.geometry("1060x560")
-    root.minsize(980, 520)
+    root.geometry("1060x620")
+    root.minsize(980, 580)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -286,7 +303,32 @@ def build_ui():
     style.map("Accent.TButton", background=[("active", "#6ea1ff")])
     style.configure("TCheckbutton", background=BG, foreground=FG, font=FONT)
     style.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2,
-                    foreground=FG)
+                    foreground=FG, arrowcolor=FG, insertcolor=FG,
+                    bordercolor="#4a4e55", lightcolor="#4a4e55",
+                    darkcolor="#4a4e55", selectbackground=PANEL2,
+                    selectforeground=FG)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", PANEL2), ("disabled", BG)],
+              foreground=[("readonly", FG), ("disabled", MUTED)],
+              background=[("readonly", PANEL2), ("active", "#3a3f47")],
+              arrowcolor=[("readonly", FG), ("disabled", MUTED)],
+              selectbackground=[("readonly", PANEL2)],
+              selectforeground=[("readonly", FG)])
+    root.option_add("*TCombobox*Listbox.background", PANEL2)
+    root.option_add("*TCombobox*Listbox.foreground", FG)
+    root.option_add("*TCombobox*Listbox.selectBackground", "#4f8cff")
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+
+    def _style_combo(widget) -> None:
+        """下拉列表是原生 Listbox，不受 ttk.Style 控制，单独着色。"""
+        try:
+            popdown = widget.tk.call("ttk::combobox::PopdownWindow", widget)
+            widget.tk.call(popdown + ".f.l", "configure",
+                           "-background", PANEL2, "-foreground", FG,
+                           "-selectbackground", "#4f8cff",
+                           "-selectforeground", "#ffffff")
+        except Exception:
+            pass
 
     state = {"busy": False, "auto": True, "interval": 60, "after_id": None,
              "starting": False, "started_at": 0.0}
@@ -318,24 +360,48 @@ def build_ui():
     # ---- 卡片 ----
     body = ttk.Frame(root, padding=(18, 4, 18, 4))
     body.pack(fill="both", expand=True)
-    for col in range(3):
-        body.columnconfigure(col, weight=1, uniform="card")
-    body.rowconfigure(0, weight=1)
 
-    card_rp = DeviceCard(body, "雷柏 VT7")
-    card_rp.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-    card_hp = DeviceCard(body, "惠普 GT87")
-    card_hp.frame.grid(row=0, column=1, sticky="nsew", padx=6)
-    card_dr = DeviceCard(body, "ROG 破风")
-    card_dr.frame.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
-    cards = (card_rp, card_hp, card_dr)
+    canvas = tk.Canvas(body, bg=BG, highlightthickness=0, height=350)
+    hbar = ttk.Scrollbar(body, orient="horizontal", command=canvas.xview)
+    canvas.configure(xscrollcommand=hbar.set)
+    hbar.pack(side="bottom", fill="x")
+    canvas.pack(side="top", fill="both", expand=True)
+
+    cards_frame = ttk.Frame(canvas)
+    canvas.create_window((0, 0), window=cards_frame, anchor="nw")
+    cards_frame.bind(
+        "<Configure>",
+        lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+    card_rp = DeviceCard(cards_frame, "雷柏 VT7")
+    card_hp = DeviceCard(cards_frame, "惠普 GT87")
+    card_dr = DeviceCard(cards_frame, "ROG 破风")
+    card_vt1 = DeviceCard(cards_frame, "雷柏 VT1")
+    cards = (card_rp, card_hp, card_dr, card_vt1)
+    for c in cards:
+        c.frame.configure(width=300, height=340)
+        c.frame.pack_propagate(False)
+        c.frame.pack(side="left", padx=6, pady=4)
+
+    def _on_wheel(event):
+        canvas.xview_scroll(int(-event.delta / 120), "units")
+
+    def bind_wheel(w):
+        w.bind("<MouseWheel>", _on_wheel)
+        for ch in w.winfo_children():
+            bind_wheel(ch)
+
+    canvas.bind("<MouseWheel>", _on_wheel)
+    cards_frame.bind("<MouseWheel>", _on_wheel)
+    for c in cards:
+        bind_wheel(c.frame)
 
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
-    foot.pack(fill="x", side="bottom")
+    foot.pack(fill="x", side="bottom", before=body)
 
     # ---- 设置区 ----
     setbar = ttk.Frame(root, style="Panel.TFrame", padding=(14, 10))
-    setbar.pack(fill="x", padx=18, pady=(2, 8))
+    setbar.pack(fill="x", padx=18, pady=(2, 8), side="bottom", before=body)
 
     def _set_tray_label(text: str) -> None:
         """每秒轮询时只在文字变化时更新控件，避免无意义的 Tk 重绘。"""
@@ -356,7 +422,7 @@ def build_ui():
         running = tc.is_tray_running()
         btn_tray.configure(state="normal",
                            text="退出托盘程序" if running else "启动托盘程序")
-        _set_tray_label("托盘运行中：右键托盘图标即可打开本窗口"
+        _set_tray_label("托盘运行中：右键托盘图标 →「打开面板」/「退出」"
                         if running else "托盘未运行：不会后台自动刷新")
 
     def notify(text: str, seconds: float = 8.0) -> None:
@@ -456,6 +522,7 @@ def build_ui():
     combo = ttk.Combobox(row_a, textvariable=v_interval, width=8, state="readonly",
                          values=[label for _, label in tc.INTERVAL_CHOICES])
     combo.pack(side="left")
+    _style_combo(combo)
     combo.bind("<<ComboboxSelected>>", on_interval)
 
     v_boot = tk.BooleanVar(value=tc.is_autostart_enabled())
@@ -465,19 +532,17 @@ def build_ui():
     # 三圈与设备的对应关系：内圈 / 中圈 / 外圈
     order = tc.ring_order(cfg)
     ring_vars = [tk.StringVar(value=tc.RING_LABELS[k]) for k in order]
+    ring_state = {"order": list(order)}
 
     def on_ring_change(changed: int):
-        keys = []
-        for var in ring_vars:
-            keys.append(next(k for k, v in tc.RING_LABELS.items()
-                             if v == var.get()))
-        for j, k in enumerate(keys):
-            if j != changed and k == keys[changed]:
-                keys[j], keys[changed] = keys[changed], keys[j]
-                break
-        for var, k in zip(ring_vars, keys):
+        label = ring_vars[changed].get()
+        new_key = next((k for k, v in tc.RING_LABELS.items() if v == label),
+                       ring_state["order"][changed])
+        order = tc.set_ring(ring_state["order"], changed, new_key)
+        ring_state["order"] = order
+        for var, k in zip(ring_vars, order):
             var.set(tc.RING_LABELS[k])
-        cfg["ring_inner"], cfg["ring_middle"], cfg["ring_outer"] = keys
+        cfg["ring_inner"], cfg["ring_middle"], cfg["ring_outer"] = order
         tc.save_config(cfg)
         tc.post_to_tray(tc.MSG_RELOAD)
 
@@ -491,6 +556,7 @@ def build_ui():
                              state="readonly",
                              values=list(tc.RING_LABELS.values()))
         combo.pack(side="left")
+        _style_combo(combo)
         combo.bind("<<ComboboxSelected>>",
                    lambda _e, idx=i: on_ring_change(idx))
     ttk.Label(row_c, text="（每圈代表一台设备）",

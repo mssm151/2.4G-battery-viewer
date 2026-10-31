@@ -48,7 +48,12 @@ static const wchar_t* kUiTitle = L"我的设备电量";
 static const UINT WM_TRAY = WM_APP + 1;
 static const UINT WM_REFRESH_DONE = WM_APP + 2;
 static const UINT WM_RAPOO_UPDATE = WM_APP + 3;
+static const UINT WM_EXTRA_UPDATE = WM_APP + 4;
 static const UINT_PTR TIMER_ID = 1;
+
+// 托盘右键菜单项
+static const UINT IDM_OPEN_PANEL = 1001;
+static const UINT IDM_QUIT = 1002;
 
 static const GUID kHidGuid = {
     0x4D1E55B2, 0xF16F, 0x11CF,
@@ -95,6 +100,53 @@ static DeviceState g_rapoo_state;
 static ULONGLONG g_rapoo_ts = 0;
 static bool g_rapoo_has = false;
 static std::wstring g_rapoo_path;   // 仅监听线程访问
+
+// --------------------------------------------------------------------------
+// Win11 原生主题：让菜单跟随系统浅色/深色
+// --------------------------------------------------------------------------
+// uxtheme.dll 的未文档化入口：
+//   133 = AllowDarkModeForWindow, 135 = SetPreferredAppMode,
+//   136 = FlushMenuThemes
+// AllowDark 只是"允许"深色，系统为浅色时菜单仍然是浅色，从而跟随系统。
+struct UxTheme {
+    HMODULE dll = nullptr;
+    int (WINAPI* set_preferred_app_mode)(int) = nullptr;
+    BOOL (WINAPI* allow_dark_for_window)(HWND, BOOL) = nullptr;
+    void (WINAPI* flush_menu_themes)() = nullptr;
+};
+
+static UxTheme g_ux;
+
+static void init_uxtheme() {
+    g_ux.dll = LoadLibraryW(L"uxtheme.dll");
+    if (!g_ux.dll) return;
+    g_ux.set_preferred_app_mode =
+        reinterpret_cast<decltype(g_ux.set_preferred_app_mode)>(
+            GetProcAddress(g_ux.dll, MAKEINTRESOURCEA(135)));
+    g_ux.allow_dark_for_window =
+        reinterpret_cast<decltype(g_ux.allow_dark_for_window)>(
+            GetProcAddress(g_ux.dll, MAKEINTRESOURCEA(133)));
+    g_ux.flush_menu_themes =
+        reinterpret_cast<decltype(g_ux.flush_menu_themes)>(
+            GetProcAddress(g_ux.dll, MAKEINTRESOURCEA(136)));
+    if (g_ux.set_preferred_app_mode)
+        g_ux.set_preferred_app_mode(1);      // AllowDark，跟随系统
+}
+
+static void apply_menu_theme() {
+    if (g_ux.allow_dark_for_window && g_hwnd)
+        g_ux.allow_dark_for_window(g_hwnd, TRUE);
+    if (g_ux.flush_menu_themes)
+        g_ux.flush_menu_themes();            // 系统主题切换后重新取色
+}
+
+// 雷柏 VT1（24AE:1214）：只进 tooltip，不参与三环
+static std::mutex g_vt1_mu;
+static DeviceState g_vt1_state;
+static ULONGLONG g_vt1_ts = 0;
+static bool g_vt1_has = false;
+static std::wstring g_vt1_path;
+static HANDLE g_vt1_thread = nullptr;
 
 static std::wstring g_hp_path;      // 仅刷新线程访问
 static std::wstring g_asus_path;
@@ -172,6 +224,25 @@ static std::wstring module_dir() {
     std::wstring p(buf, n);
     size_t pos = p.find_last_of(L"\\/");
     return pos == std::wstring::npos ? L"." : p.substr(0, pos);
+}
+
+static std::wstring parent_dir(const std::wstring& dir) {
+    size_t pos = dir.find_last_of(L"\\/");
+    if (pos == std::wstring::npos || pos < 2) return L"";
+    return dir.substr(0, pos);
+}
+
+// exe 现在放在 dist\ 里（build_tray.ps1 的输出），但配置 / PID / 面板脚本
+// 仍在项目根目录。向上找到含 my_devices.py 的目录作为根；找不到就用 exe 目录。
+static std::wstring project_dir(const std::wstring& exe_dir) {
+    std::wstring dir = exe_dir;
+    for (int i = 0; i < 3 && !dir.empty(); ++i) {
+        if (GetFileAttributesW((dir + L"\\my_devices.py").c_str())
+            != INVALID_FILE_ATTRIBUTES)
+            return dir;
+        dir = parent_dir(dir);
+    }
+    return exe_dir;
 }
 
 static std::string read_file(const std::wstring& path) {
@@ -312,7 +383,8 @@ static void cleanup_native_zombie() {
 // HID
 // --------------------------------------------------------------------------
 static std::wstring find_hid_path(USHORT vid, USHORT pid,
-                                  USHORT usage_page, USHORT usage) {
+                                  USHORT usage_page, USHORT usage,
+                                  DWORD want_in = 0) {
     HDEVINFO devs = SetupDiGetClassDevsW(
         &kHidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (devs == INVALID_HANDLE_VALUE) return L"";
@@ -353,7 +425,9 @@ static std::wstring find_hid_path(USHORT vid, USHORT pid,
                 HIDP_CAPS caps{};
                 if (HidP_GetCaps(pp, &caps) == HIDP_STATUS_SUCCESS
                     && caps.UsagePage == usage_page
-                    && caps.Usage == usage) {
+                    && caps.Usage == usage
+                    && (!want_in
+                        || caps.InputReportByteLength == want_in)) {
                     match = true;
                 }
                 HidD_FreePreparsedData(pp);
@@ -444,6 +518,24 @@ static DeviceState read_rapoo(DWORD timeout_ms) {
         if (g_rapoo_has) return g_rapoo_state;   // 用最后一次已知值
     }
     return make_offline(L"没收到雷柏状态报文（请动一下鼠标）");
+}
+
+static DeviceState read_vt1(DWORD timeout_ms) {
+    ULONGLONG deadline = GetTickCount64() + timeout_ms;
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lk(g_vt1_mu);
+            if (g_vt1_has && GetTickCount64() - g_vt1_ts <= 10000)
+                return g_vt1_state;
+        }
+        if (GetTickCount64() >= deadline) break;
+        Sleep(50);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_vt1_mu);
+        if (g_vt1_has) return g_vt1_state;
+    }
+    return make_offline(L"暂无数据");
 }
 
 static DeviceState read_hp() {
@@ -692,7 +784,8 @@ static NOTIFYICONDATAW make_nid() {
     return nid;
 }
 
-static void build_tip(const DeviceState st[3], wchar_t* tip, size_t cap) {
+static void build_tip(const DeviceState st[3], const DeviceState& extra,
+                      wchar_t* tip, size_t cap) {
     std::wstring t;
     for (int layer = 0; layer < 3; ++layer) {
         int dev = g_cfg.ring[layer];
@@ -708,8 +801,12 @@ static void build_tip(const DeviceState st[3], wchar_t* tip, size_t cap) {
         } else {
             t += L"暂无数据";
         }
-        if (layer < 2) t += L"\n";
+        t += L"\n";
     }
+    t += L"────────\n";
+    t += L"雷柏 VT1：";
+    if (extra.level >= 0) t += std::to_wstring(extra.level) + L"%";
+    else t += L"暂无数据";
     wcsncpy(tip, t.c_str(), cap - 1);
     tip[cap - 1] = 0;
 }
@@ -717,9 +814,14 @@ static void build_tip(const DeviceState st[3], wchar_t* tip, size_t cap) {
 static void update_icons() {
     if (!g_hwnd) return;
     DeviceState st[3];
+    DeviceState extra;
     {
         std::lock_guard<std::mutex> lk(g_state_mu);
         for (int i = 0; i < 3; ++i) st[i] = g_states[i];
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_vt1_mu);
+        extra = g_vt1_state;
     }
     int levels[3];
     for (int layer = 0; layer < 3; ++layer)
@@ -753,7 +855,7 @@ static void update_icons() {
 
     NOTIFYICONDATAW nid = make_nid();
     nid.hIcon = g_item.icon;
-    build_tip(st, nid.szTip, 128);
+    build_tip(st, extra, nid.szTip, 128);
     if (!g_item.added) {
         g_item.added = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
         debug_log(L"NIM_ADD 三环 -> %d", g_item.added ? 1 : 0);
@@ -784,7 +886,7 @@ static DWORD WINAPI listener_thread(LPVOID) {
     double backoff = 1.0;
     while (WaitForSingleObject(g_quit_event, 0) != WAIT_OBJECT_0) {
         if (g_rapoo_path.empty()) {
-            g_rapoo_path = find_hid_path(0x24AE, 0x1413, 0xFF00, 0x0002);
+            g_rapoo_path = find_hid_path(0x24AE, 0x1413, 0xFF00, 0x0002, 19);
             debug_log(L"Rapoo HID path: %ls", g_rapoo_path.c_str());
         }
         if (g_rapoo_path.empty()) {
@@ -842,6 +944,59 @@ static DWORD WINAPI listener_thread(LPVOID) {
     return 0;
 }
 
+static DWORD WINAPI vt1_listener_thread(LPVOID) {
+    double backoff = 1.0;
+    while (WaitForSingleObject(g_quit_event, 0) != WAIT_OBJECT_0) {
+        if (g_vt1_path.empty()) {
+            g_vt1_path = find_hid_path(0x24AE, 0x1214, 0xFF00, 0x0002, 7);
+            debug_log(L"VT1 HID path: %ls", g_vt1_path.c_str());
+        }
+        if (g_vt1_path.empty()) {
+            WaitForSingleObject(g_quit_event, (DWORD)(backoff * 1000));
+            backoff = std::min(backoff * 2, 30.0);
+            continue;
+        }
+        backoff = 1.0;
+        HANDLE h = open_read(g_vt1_path);
+        if (h == INVALID_HANDLE_VALUE) {
+            g_vt1_path.clear();
+            WaitForSingleObject(g_quit_event, 1000);
+            continue;
+        }
+        debug_log(L"VT1 listener opened");
+        while (WaitForSingleObject(g_quit_event, 0) != WAIT_OBJECT_0) {
+            BYTE buf[32];
+            DWORD got = 0;
+            ULONGLONG t0 = GetTickCount64();
+            if (read_report(h, buf, sizeof(buf), 500, &got)) {
+                debug_log(L"VT1 report len=%lu id=0x%02X", got, buf[0]);
+                if (got >= 7 && buf[0] == 0xBB) {
+                    DeviceState s;
+                    s.online = true;
+                    int level = buf[6];
+                    s.level = (level <= 100) ? level : -1;
+                    {
+                        std::lock_guard<std::mutex> lk(g_vt1_mu);
+                        g_vt1_state = s;
+                        g_vt1_ts = GetTickCount64();
+                        g_vt1_has = true;
+                    }
+                    if (g_hwnd)
+                        PostMessageW(g_hwnd, WM_EXTRA_UPDATE, 0, 0);
+                }
+            } else if (GetTickCount64() - t0 < 50) {
+                break;
+            }
+        }
+        CloseHandle(h);
+        if (WaitForSingleObject(g_quit_event, 0) != WAIT_OBJECT_0) {
+            g_vt1_path.clear();
+            WaitForSingleObject(g_quit_event, 1000);
+        }
+    }
+    return 0;
+}
+
 static DWORD WINAPI refresh_thread(LPVOID) {
     HANDLE evs[2] = {g_quit_event, g_refresh_event};
     while (true) {
@@ -863,6 +1018,11 @@ static DWORD WINAPI refresh_thread(LPVOID) {
         {
             std::lock_guard<std::mutex> lk(g_state_mu);
             g_states[0] = r;
+        }
+        DeviceState v = read_vt1(3000);
+        {
+            std::lock_guard<std::mutex> lk(g_vt1_mu);
+            g_vt1_state = v;
         }
         if (!PostMessageW(g_hwnd, WM_REFRESH_DONE, 0, 0)) break;
     }
@@ -910,6 +1070,31 @@ static void open_panel() {
     }
 }
 
+// 右键托盘图标：弹出菜单（打开面板 / 退出）
+static void show_context_menu() {
+    apply_menu_theme();          // 每次弹出前按当前系统主题刷新配色
+
+    POINT pt{};
+    GetCursorPos(&pt);
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, IDM_OPEN_PANEL, L"打开面板");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_QUIT, L"退出");
+    SetMenuDefaultItem(menu, IDM_OPEN_PANEL, FALSE);
+
+    // 必须先把本窗口设为前台，否则任务栏上的托盘菜单点一下就会消失
+    BOOL fg = SetForegroundWindow(g_hwnd);
+    BOOL ret = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, pt.x,
+                              pt.y, 0, g_hwnd, nullptr);
+    DWORD err = GetLastError();
+    debug_log(L"菜单: SetForegroundWindow=%d TrackPopupMenu=%d err=%lu pos=%ld,%ld",
+              fg ? 1 : 0, ret ? 1 : 0, err, pt.x, pt.y);
+    DestroyMenu(menu);
+    PostMessageW(g_hwnd, WM_NULL, 0, 0);   // MSDN：菜单关闭后补一条空消息
+}
+
 static void reload_config() {
     int old_interval = g_cfg.interval;
     int old_ring[3] = {g_cfg.ring[0], g_cfg.ring[1], g_cfg.ring[2]};
@@ -931,13 +1116,28 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_TRAY) {
         UINT ev = LOWORD(lp);
         if (ev == WM_RBUTTONUP) {
-            open_panel();
+            show_context_menu();
         } else if (ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK) {
             request_refresh();
         }
         return 0;
     }
-    if (msg == WM_REFRESH_DONE || msg == WM_RAPOO_UPDATE) {
+    if (msg == WM_COMMAND && HIWORD(wp) == 0) {
+        switch (LOWORD(wp)) {
+        case IDM_OPEN_PANEL:
+            open_panel();
+            return 0;
+        case IDM_QUIT:
+            // 用 PostMessage 推迟到菜单关闭之后再销毁窗口，
+            // 避免在 TrackPopupMenu 调用栈里 DestroyWindow
+            PostMessageW(hwnd, g_msg_quit, 0, 0);
+            return 0;
+        default:
+            break;
+        }
+    }
+    if (msg == WM_REFRESH_DONE || msg == WM_RAPOO_UPDATE
+        || msg == WM_EXTRA_UPDATE) {
         update_icons();
         return 0;
     }
@@ -997,6 +1197,8 @@ static int run_once() {
     g_quit_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_listener_thread = CreateThread(nullptr, 0, listener_thread, nullptr, 0,
                                      nullptr);
+    g_vt1_thread = CreateThread(nullptr, 0, vt1_listener_thread, nullptr, 0,
+                                nullptr);
     DeviceState r = read_rapoo(6500);
     DeviceState h = read_hp();
     DeviceState a = read_asus();
@@ -1013,10 +1215,20 @@ static int run_once() {
     line(L"雷柏 VT7", r);
     line(L"惠普 GT87", h);
     line(L"ROG 破风", a);
+    DeviceState v = read_vt1(6500);
+    print_line(L"────────");
+    if (v.level >= 0)
+        print_line(L"雷柏 VT1：" + std::to_wstring(v.level) + L"%");
+    else
+        print_line(L"雷柏 VT1：暂无数据");
     SetEvent(g_quit_event);
     if (g_listener_thread) {
         WaitForSingleObject(g_listener_thread, 2000);
         CloseHandle(g_listener_thread);
+    }
+    if (g_vt1_thread) {
+        WaitForSingleObject(g_vt1_thread, 2000);
+        CloseHandle(g_vt1_thread);
     }
     CloseHandle(g_quit_event);
     return 0;
@@ -1035,7 +1247,7 @@ static int post_message_to_tray(const wchar_t* name) {
 // --------------------------------------------------------------------------
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int) {
     g_inst = inst;
-    g_dir = module_dir();
+    g_dir = project_dir(module_dir());
 
     for (const wchar_t* p = cmdline; p && *p; ++p) {
         if (wcsstr(p, L"--debug")) { g_debug = true; break; }
@@ -1072,8 +1284,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int) {
     }
 
     SetProcessDPIAware();
+    init_uxtheme();              // 菜单跟随系统浅色/深色
     load_config(g_cfg);
     write_pid();
+    debug_log(L"config: interval=%d ring=%d,%d,%d", g_cfg.interval,
+              g_cfg.ring[0], g_cfg.ring[1], g_cfg.ring[2]);
 
     g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     g_msg_reload = RegisterWindowMessageW(kReloadMsgName);
@@ -1091,6 +1306,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int) {
 
     g_listener_thread = CreateThread(nullptr, 0, listener_thread, nullptr, 0,
                                      nullptr);
+    g_vt1_thread = CreateThread(nullptr, 0, vt1_listener_thread, nullptr, 0,
+                                nullptr);
     g_refresh_thread = CreateThread(nullptr, 0, refresh_thread, nullptr, 0,
                                     nullptr);
     SetTimer(g_hwnd, TIMER_ID, (UINT)g_cfg.interval * 1000, nullptr);
@@ -1111,6 +1328,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int) {
     if (g_listener_thread) {
         WaitForSingleObject(g_listener_thread, 1000);
         CloseHandle(g_listener_thread);
+    }
+    if (g_vt1_thread) {
+        WaitForSingleObject(g_vt1_thread, 1000);
+        CloseHandle(g_vt1_thread);
     }
     if (g_refresh_event) CloseHandle(g_refresh_event);
     if (g_quit_event) CloseHandle(g_quit_event);

@@ -10,6 +10,7 @@ _dbg*.txt
 _hidcap.log
 
 # 原生托盘构建产物 / 调试输出
+dist/
 tray_native.exe
 native_*.txt
 native_*.log
