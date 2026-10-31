@@ -15,7 +15,6 @@ import sys
 from ctypes import wintypes
 from typing import Optional
 
-import win_link
 import win_shell
 
 # 源码在 <root>\src\app，配置 / PID / 构建产物仍在项目根目录
@@ -301,58 +300,6 @@ def autostart_status() -> dict:
         "target": autostart_command(),
         "legacy_registry": legacy_autostart_enabled(),
     }
-
-
-# --------------------------------------------------------------------------
-# 桌面链接（软连接：目录 junction / 文件符号链接）
-# --------------------------------------------------------------------------
-DESKTOP_LINK_NAME = "设备电量查看器"          # 桌面上的项目文件夹链接名
-LAUNCHER_NAMES = ["我的设备电量.bat", "电量托盘.bat"]
-
-
-def desktop_dir() -> str:
-    return win_shell.desktop_dir()
-
-
-def desktop_link_status() -> dict:
-    """桌面链接现状：{'folder': (路径, 类型), 'links': {名字: (路径, 类型)}}"""
-    d = win_shell.desktop_dir()
-    info = {
-        "folder": (os.path.join(d, DESKTOP_LINK_NAME),
-                   win_link.link_kind(os.path.join(d, DESKTOP_LINK_NAME))),
-        "links": {},
-    }
-    for name in LAUNCHER_NAMES:
-        p = os.path.join(d, name)
-        info["links"][name] = (p, win_link.link_kind(p))
-    return info
-
-
-def install_desktop_links() -> dict:
-    """建桌面链接：项目文件夹的目录链接 + 启动脚本的软链接。
-
-    返回 {'folder': 类型, 'links': {名字: 类型}, 'errors': [消息]}
-    """
-    d = win_shell.desktop_dir()
-    out: dict = {"folder": "", "links": {}, "errors": []}
-
-    try:
-        out["folder"] = win_link.create_dir_link(
-            BASE_DIR, os.path.join(d, DESKTOP_LINK_NAME))
-    except OSError as e:
-        out["errors"].append(str(e))
-
-    for name in LAUNCHER_NAMES:
-        src = os.path.join(BASE_DIR, name)
-        if not os.path.isfile(src):
-            out["errors"].append(f"项目里没有 {name}，跳过")
-            continue
-        try:
-            out["links"][name] = win_link.create_file_link(
-                src, os.path.join(d, name))
-        except OSError as e:
-            out["errors"].append(str(e))
-    return out
 
 
 # --------------------------------------------------------------------------

@@ -35,7 +35,6 @@ import rapoo_vt7 as rv
 import battery as bt
 import darkrim_proto as drp
 import tray_common as tc
-import win_link
 from hid_win import HidInterface
 
 
@@ -465,36 +464,7 @@ def build_ui():
         state["starting"] = False
         refresh_tray_state()
         if not ok:
-            notify("启动失败：可双击桌面「电量托盘」再试", 12)
-
-    def on_links():
-        btn_link.configure(state="disabled", text="正在创建…")
-
-        def work():
-            try:
-                r = tc.install_desktop_links()
-            except Exception as e:
-                traceback.print_exc()
-                r = {"folder": "", "links": {}, "errors": [str(e)]}
-            results.put(("links", r))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def links_done(r: dict):
-        import tkinter.messagebox as mb
-        btn_link.configure(state="normal", text="重建桌面链接")
-        bits = []
-        kind = r.get("folder") or ""
-        if kind:
-            bits.append(f"文件夹→{win_link.KIND_LABEL.get(kind, kind)}")
-        for name, k in (r.get("links") or {}).items():
-            bits.append(f"{name}→{win_link.KIND_LABEL.get(k, k)}")
-        if bits:
-            notify("桌面链接已更新：" + "；".join(bits), 12)
-        else:
-            notify("桌面链接创建失败", 12)
-        if r.get("errors"):
-            mb.showwarning("桌面链接", "\n".join(r["errors"]))
+            notify("启动失败：请确认 dist\\tray_native.exe 存在，或重新打开面板", 12)
 
     def on_tray_toggle():
         if tc.is_tray_running():
@@ -572,8 +542,6 @@ def build_ui():
 
     btn_tray = ttk.Button(row_b, text="退出托盘程序", command=on_tray_toggle)
     btn_tray.pack(side="right")
-    btn_link = ttk.Button(row_b, text="重建桌面链接", command=on_links)
-    btn_link.pack(side="right", padx=(0, 8))
     lab_tray = ttk.Label(row_b, text="", style="CardSub.TLabel")
     lab_tray.pack(side="right", padx=(0, 12))
     refresh_tray_state()
@@ -631,8 +599,6 @@ def build_ui():
                     apply(payload)
                 elif kind == "tray":
                     tray_done(payload)
-                elif kind == "links":
-                    links_done(payload)
         except queue.Empty:
             pass
         except Exception:
@@ -664,22 +630,9 @@ def build_ui():
 def main() -> None:
     parser = argparse.ArgumentParser(description="我的设备电量")
     parser.add_argument("--once", action="store_true", help="命令行读一次就退出")
-    parser.add_argument("--install-links", action="store_true",
-                        help="在桌面重建软连接（项目文件夹 + 启动脚本）")
     parser.add_argument("--autostart", choices=["on", "off", "status"],
                         help="开机自启：on 打开 / off 关闭 / status 查看")
     args = parser.parse_args()
-
-    if args.install_links:
-        r = tc.install_desktop_links()
-        print("桌面链接：")
-        print(f"  项目文件夹 {tc.DESKTOP_LINK_NAME} -> "
-              f"{win_link.KIND_LABEL.get(r['folder'], r['folder'] or '创建失败')}")
-        for name, kind in r["links"].items():
-            print(f"  {name} -> {win_link.KIND_LABEL.get(kind, kind)}")
-        for msg in r["errors"]:
-            print("  注意：", msg)
-        return
 
     if args.autostart:
         if args.autostart == "status":
