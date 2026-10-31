@@ -2,8 +2,10 @@
 """tray_common.py —— 托盘程序与界面共用的配置 / 开机自启 / 进程间通信
 
 托盘和简洁界面（my_devices.py）是两个进程，共用这里的配置文件与窗口消息。
-托盘优先使用原生 `tray_native.exe`；不存在时回退到 Python 版 `tray_app.py`。
+托盘优先使用原生 `dist\tray_native.exe`；不存在时回退到 Python 版 `src\app\tray_app.py`。
 两者窗口类、互斥名、消息名完全一致，界面无需关心用的是哪一个。
+
+源码在 src\app\ 与 src\devices\；配置 / PID 等运行时文件在项目根目录。
 """
 
 from __future__ import annotations

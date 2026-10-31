@@ -16,6 +16,9 @@ native_*.txt
 native_*.log
 native_*.err
 
+# win_icon.py 预览输出
+_icon_preview/
+
 # 个人设置（刷新间隔 / 开机自启开关 / 手动标定协议）
 tray_config.json
 protocols_user.json

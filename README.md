@@ -4,7 +4,7 @@ Windows 上读取 2.4G 无线外设电量的小工具。
 
 - **简洁面板**：纯 Python + ctypes，零第三方依赖（不用 hidapi / pystray / Pillow / pywin32）。
 - **常驻托盘**：原生 C++/Win32（MinGW 静态编译，单 exe），私有内存约 **2.3MB**、CPU 近 0；
-  找不到 `tray_native.exe` 时自动回退到 Python 版 `tray_app.py`。
+  找不到 `dist\tray_native.exe` 时自动回退到 Python 版 `src/app/tray_app.py`。
 
 ## 当前适配的设备
 
@@ -33,25 +33,25 @@ Windows 上读取 2.4G 无线外设电量的小工具。
 ## 使用方法
 
 ```bash
-python my_devices.py
+python src\app\my_devices.py
 ```
 
 面板里会显示四张设备卡片（雷柏 VT7 / 惠普 GT87 / ROG 破风 / 雷柏 VT1），
 默认自动刷新，底部可以改刷新间隔。窗口宽度不够时卡片区域横向滚动
 （鼠标滚轮或底部滚动条）。
 
-- 只想看一眼：`python my_devices.py --once` —— 打印后退出
-- 托盘常驻：先构建 `tray_native.exe`，然后直接运行它；面板里的
-  「启动托盘程序」会自动优先用原生版，找不到时回退 `pythonw tray_app.py`
-- 构建原生托盘：`powershell -ExecutionPolicy Bypass -File build_tray.ps1`
-  （需要 MinGW g++；静态链接，无运行时依赖）
+- 只想看一眼：`python src\app\my_devices.py --once` —— 打印后退出
+- 托盘常驻：先构建 `dist\tray_native.exe`，然后直接运行它；面板里的
+  「启动托盘程序」会自动优先用原生版，找不到时回退 `pythonw src\app\tray_app.py`
+- 构建原生托盘：`powershell -ExecutionPolicy Bypass -File native\build_tray.ps1`
+  （需要 MinGW g++；静态链接，无运行时依赖，产物输出到 `dist\`）
 - 如果之前已经开启过开机自启，构建原生托盘后请重新勾选一次「开机自启」，
-  让启动文件夹里的快捷方式指向 `tray_native.exe`（程序不会自动改已有的启动项）
-- 原生托盘排查：`tray_native.exe --debug`、`--once`（读一次三台设备）、`--quit`
+  让启动文件夹里的快捷方式指向 `dist\tray_native.exe`（程序不会自动改已有的启动项）
+- 原生托盘排查：`dist\tray_native.exe --debug`、`--once`（读一次三台设备）、`--quit`
 - 托盘只有一个图标：三个同心圆角方形环，每圈独立表示一台设备的电量；
   内 / 中 / 外与设备的对应关系在面板底部「电量环」三个下拉框里配置。
   悬停 tooltip 上半部分按环顺序列出三台设备，分割线下方显示雷柏 VT1 等其他设备
-- 想摸新设备的协议：`python app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
+- 想摸新设备的协议：`python src\tools\app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
 
 ## 用 prompt 做一份你自己的
 
@@ -99,11 +99,8 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
    这样任务管理器 →「启动」标签里能直接看到、能启用/禁用。
    不要用注册表 Run（虽然也能被任务管理器识别，但在启动文件夹里更直观、更容易管理）。
    快捷方式目标是 `pythonw.exe` + 脚本路径，**不能弹黑窗**。
-6. **桌面入口用软连接**：桌面放一个指向项目目录的目录链接 + 指向启动脚本的文件链接，
-   不要复制脚本。目录优先真符号链接，没有管理员/开发者模式时降级用 junction（`mklink /J`），
-   文件降级用硬链接（`os.link`）。
-7. **不写任何日志文件**：只保留 `--debug` 参数时的控制台输出。
-8. 关闭托盘时进程必须真正退出，**不能留僵尸进程**（详见"已知的坑"）。
+6. **不写任何日志文件**：只保留 `--debug` 参数时的控制台输出。
+7. 关闭托盘时进程必须真正退出，**不能留僵尸进程**（详见"已知的坑"）。
 
 ## 二、要读的两台设备
 
@@ -176,14 +173,13 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 
 ## 五、验收标准
 
-1. `python my_devices.py --once` 能打印两行电量（鼠标 xx%、耳机 xx%）。
+1. `python src\app\my_devices.py --once` 能打印各设备电量。
 2. 简洁面板里两张卡片显示正确百分比，颜色随电量变化（≥60 绿 / 30–59 黄 / <30 红）。
 3. 任务管理器 →「启动」标签里能看到「电量托盘」，可直接启用/禁用，
    且与界面里的「开机自启」勾选框状态一致。
-4. 桌面上是链接（不是副本）：指向项目目录的目录链接 + 指向启动脚本的文件链接。
-5. 项目目录里**不产生任何日志文件**；`--debug` 时才有控制台输出。
-6. 连续启停托盘 3 次正常；退出后无残留进程、无残留托盘图标。
-7. 空闲时 CPU 占用接近 0（实测 75 秒内 < 0.5 秒 CPU）。
+4. 项目目录里**不产生任何日志文件**；`--debug` 时才有控制台输出。
+5. 连续启停托盘 3 次正常；退出后无残留进程、无残留托盘图标。
+6. 空闲时 CPU 占用接近 0（实测 75 秒内 < 0.5 秒 CPU）。
 
 </details>
 
@@ -195,27 +191,38 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 
 ## 目录说明
 
-| 文件 | 说明 |
-|---|---|
-| `hid_win.py` | HID 底层：枚举接口、Feature Report 读写、异步 Input Report、字段解析 |
-| `rapoo_vt7.py` | 雷柏 VT7：解析设备主动推送的 Report `0x07` 状态报文 |
-| `rapoo_vt1.py` | 雷柏 VT1 / VT1 Pro：`0xFF00:0x0002` 的 7 字节推送，只进 tooltip |
-| `hp_gt87.py` | 惠普 GT87：Compx 2.4G 接收器的 `0x13/0x0a` 电量查询 |
-| `asus_pelta.py` | ROG 破风：ASUS 私有 HID 协议（`0x12/0x07` 电量、`0x12/0x28` 充电状态） |
-| `battery.py` | 旧版通用电量读取层（ATK 等，保留） |
-| `darkrim_proto.py` | 旧版 DARKRIM 杰理方案私有协议（保留） |
-| `bt_battery.py` | 蓝牙耳机 HFP 电量（未公开 PnP 属性） |
-| `my_devices.py` | **主界面**（三台设备简洁面板） |
-| `tray_native.cpp` | **原生托盘源码**（C++/Win32：HID、图标、单实例、窗口消息） |
-| `build_tray.ps1` | 用 MinGW g++ 静态编译 `tray_native.exe` |
-| `tray_native.exe` | 原生托盘构建产物（不入库，用脚本生成；缺失时回退 Python） |
-| `tray_app.py` | Python 回退托盘（找不到原生 exe 时使用） |
-| `tray_common.py` | 配置、开机自启、进程间消息（原生 / Python 托盘共用） |
-| `win_icon.py` | Python 回退版的图标绘制（三个同心电量环）→ ICO → HICON |
-| `win_link.py` | 软连接：符号链接 / 目录 junction / 硬链接，按权限自动降级 |
-| `win_shell.py` | 已知文件夹路径 + 用 ctypes COM 创建 `.lnk` |
-| `app.py` | 完整调试版界面 |
-| `PROMPT.md` | 把整个项目整理成一份可复用的提示词 |
+```
+2.4G-battery-viewer/
+├── README.md
+├── .gitignore
+├── dist/                     # 构建产物（不入库）
+│   └── tray_native.exe
+├── src/
+│   ├── app/                  # 托盘与简洁面板
+│   │   ├── my_devices.py     # 简洁面板入口
+│   │   ├── tray_app.py       # Python 回退托盘
+│   │   ├── tray_common.py    # 配置、自启、进程间消息
+│   │   ├── win_icon.py       # 三环图标绘制（Python 回退托盘用）
+│   │   └── win_shell.py      # 已知文件夹路径 + .lnk 创建
+│   ├── devices/              # HID 协议与电量读取
+│   │   ├── hid_win.py        # HID 底层：枚举、Feature/Input Report、字段解析
+│   │   ├── rapoo_vt7.py      # 雷柏 VT7（Report 0x07 主动推送）
+│   │   ├── rapoo_vt1.py      # 雷柏 VT1 / VT1 Pro（只进 tooltip）
+│   │   ├── hp_gt87.py        # 惠普 GT87（0x13/0x0a 查询）
+│   │   ├── asus_pelta.py     # ROG 破风（0x12/0x07 电量、0x12/0x28 充电）
+│   │   ├── battery.py        # 旧版通用电量读取层（保留）
+│   │   ├── darkrim_proto.py  # 旧版 DARKRIM 杰理协议（保留）
+│   │   └── bt_battery.py     # 蓝牙耳机 HFP 电量
+│   └── tools/
+│       └── app.py            # 完整调试界面
+├── native/
+│   ├── tray_native.cpp       # 原生托盘源码（HID、图标、单实例、窗口消息）
+│   └── build_tray.ps1        # MinGW 构建脚本（输出到 dist\）
+└── docs/
+    └── PROMPT.md             # 把整个项目整理成一份可复用的提示词
+```
+
+运行时文件不入库，位于项目根：`tray_config.json`、`tray_pid.txt`、`protocols_user.json`。
 
 ## 两个值得一提的实现细节
 
@@ -224,7 +231,7 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 2. **销毁托盘窗口后必须 `PostQuitMessage(0)`**。只调 `DestroyWindow` 会留下
    「窗口和图标都没了、但进程还活着」的僵尸进程，它占着单实例锁，导致之后再启动都没反应。
 
-更多坑见 [PROMPT.md](PROMPT.md)。
+更多坑见 [PROMPT.md](docs/PROMPT.md)。
 
 ## 性能
 
