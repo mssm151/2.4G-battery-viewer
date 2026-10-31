@@ -11,7 +11,8 @@
 //   惠普 GT87  3554:FA09  0xFF02:0x0002  Report 0x13（发 13 05 01 00）
 //   ROG 破风   0B05:1B84  0xFF00:0x0001  Report 0xCC（发 CC 12 07 00 00）
 //
-// 编译：build_tray.ps1（MinGW g++，静态链接，无运行时依赖）
+// 编译：native\build_tray.ps1（MinGW g++，静态链接，输出到 dist\tray_native.exe）
+// 布局：本文件在 native\，源码在 src\app\、src\devices\，配置/PID 在项目根
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -232,14 +233,18 @@ static std::wstring parent_dir(const std::wstring& dir) {
     return dir.substr(0, pos);
 }
 
-// exe 现在放在 dist\ 里（build_tray.ps1 的输出），但配置 / PID / 面板脚本
-// 仍在项目根目录。向上找到含 my_devices.py 的目录作为根；找不到就用 exe 目录。
+// exe 放在 dist\ 里，源码在 src\app\。配置 / PID 仍在项目根目录。
+// 向上找到含 src\app\my_devices.py 的目录作为根；旧布局的 my_devices.py 作为兜底。
 static std::wstring project_dir(const std::wstring& exe_dir) {
     std::wstring dir = exe_dir;
     for (int i = 0; i < 3 && !dir.empty(); ++i) {
-        if (GetFileAttributesW((dir + L"\\my_devices.py").c_str())
-            != INVALID_FILE_ATTRIBUTES)
-            return dir;
+        bool has_new =
+            GetFileAttributesW((dir + L"\\src\\app\\my_devices.py").c_str())
+                != INVALID_FILE_ATTRIBUTES;
+        bool has_old =
+            GetFileAttributesW((dir + L"\\my_devices.py").c_str())
+                != INVALID_FILE_ATTRIBUTES;
+        if (has_new || has_old) return dir;
         dir = parent_dir(dir);
     }
     return exe_dir;
@@ -1058,7 +1063,7 @@ static void open_panel() {
                     L"设备电量", MB_ICONWARNING);
         return;
     }
-    std::wstring script = g_dir + L"\\my_devices.py";
+    std::wstring script = g_dir + L"\\src\\app\\my_devices.py";
     std::wstring cmd = L"\"" + py + L"\" \"" + script + L"\"";
     STARTUPINFOW si{};
     si.cb = sizeof(si);

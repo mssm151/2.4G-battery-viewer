@@ -1,9 +1,14 @@
 # build_tray.ps1 —— 用 MinGW g++ 静态编译原生托盘
 #
-# 构建产物统一放到 dist\（源码与配置仍在项目根目录）：
+# 脚本位于 native\，源码在同一目录，构建产物统一输出到项目根的 dist\：
 #   dist\tray_native.exe
 $ErrorActionPreference = "Stop"
-Set-Location $PSScriptRoot
+
+$root = Split-Path -Parent $PSScriptRoot
+$src = Join-Path $PSScriptRoot "tray_native.cpp"
+$outDir = Join-Path $root "dist"
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$out = Join-Path $outDir "tray_native.exe"
 
 $gpp = "D:\mingw64\bin\g++.exe"
 if (-not (Test-Path $gpp)) {
@@ -12,14 +17,12 @@ if (-not (Test-Path $gpp)) {
     $gpp = $cmd.Source
 }
 
-$outDir = Join-Path $PSScriptRoot "dist"
-New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$out = Join-Path $outDir "tray_native.exe"
+Set-Location $root
 
 & $gpp `
     -std=c++17 -O2 -s -municode -mwindows `
     -DUNICODE -D_UNICODE `
-    -o $out (Join-Path $PSScriptRoot "tray_native.cpp") `
+    -o $out $src `
     -static -static-libgcc -static-libstdc++ `
     -lsetupapi -lhid -lshell32 -luser32 -lgdi32
 
